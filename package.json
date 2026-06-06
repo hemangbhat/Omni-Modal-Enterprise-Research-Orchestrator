@@ -1,0 +1,21 @@
+{
+  "name": "omni-modal-enterprise-research-orchestrator",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev:web": "npm --workspace apps/web run dev",
+    "build:web": "npm --workspace apps/web run build",
+    "lint:web": "npm --workspace apps/web run lint",
+    "typecheck:web": "npm --workspace apps/web run typecheck",
+    "typecheck:db": "npm --workspace packages/db run typecheck",
+    "test:backend": "python -m unittest discover -s services/api/tests",
+    "validate": "npm run typecheck:web && npm run typecheck:db && npm run test:backend"
+  },
+  "workspaces": [
+    "apps/web",
+    "packages/db"
+  ],
+  "overrides": {
+    "drizzle-orm": "^0.45.2"
+  }
+}

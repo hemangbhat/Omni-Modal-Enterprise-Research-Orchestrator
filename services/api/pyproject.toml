@@ -31,6 +31,11 @@ performance = [
     "cachetools>=5.3.0",
 ]
 
+test = [
+    "hypothesis>=6.0.0",
+    "pytest>=8.0.0",
+]
+
 [project.scripts]
 omni-entities = "omni_modal.entity_extraction.cli:main"
 omni-mcp = "omni_modal.mcp.cli:main"

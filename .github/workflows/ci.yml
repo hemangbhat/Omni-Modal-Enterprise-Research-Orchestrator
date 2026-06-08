@@ -24,7 +24,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -e ".[db,observability,performance]"
+        run: pip install -e ".[db,observability,performance,test]"
 
       - name: Install optional ML deps for tests
         run: pip install sentence-transformers || true

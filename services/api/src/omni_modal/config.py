@@ -14,6 +14,8 @@ class BackendSettings:
     adk_project_id_configured: bool
     a2a_delegation_endpoint_configured: bool
     gemini_interactions_endpoint_configured: bool
+    embedding_backend: str
+    embedding_backend_configured: bool
 
     def redacted(self) -> dict[str, str | bool]:
         return {
@@ -25,10 +27,24 @@ class BackendSettings:
             "adk_project_id_configured": self.adk_project_id_configured,
             "a2a_delegation_endpoint_configured": self.a2a_delegation_endpoint_configured,
             "gemini_interactions_endpoint_configured": self.gemini_interactions_endpoint_configured,
+            "embedding_backend": self.embedding_backend,
+            "embedding_backend_configured": self.embedding_backend_configured,
         }
 
 
+def _embedding_backend_configured(backend: str) -> bool:
+    """True when the selected real backend has the config it needs."""
+    if backend == "openai":
+        return bool(os.environ.get("OPENAI_API_KEY"))
+    if backend == "sentence-transformers":
+        return True  # no key required; availability is checked at runtime
+    return backend == "hashing"
+
+
 def load_settings() -> BackendSettings:
+    embedding_backend = (
+        os.environ.get("EMBEDDING_BACKEND", "hashing").strip().lower() or "hashing"
+    )
     return BackendSettings(
         environment=os.environ.get("ENVIRONMENT", "development"),
         database_url_configured=bool(os.environ.get("DATABASE_URL")),
@@ -44,4 +60,6 @@ def load_settings() -> BackendSettings:
         gemini_interactions_endpoint_configured=bool(
             os.environ.get("GEMINI_INTERACTIONS_ENDPOINT")
         ),
+        embedding_backend=embedding_backend,
+        embedding_backend_configured=_embedding_backend_configured(embedding_backend),
     )

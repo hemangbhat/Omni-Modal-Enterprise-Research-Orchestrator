@@ -3,13 +3,22 @@
   "private": true,
   "version": "0.1.0",
   "scripts": {
+    "dev": "npm run dev:web",
     "dev:web": "npm --workspace apps/web run dev",
     "build:web": "npm --workspace apps/web run build",
     "lint:web": "npm --workspace apps/web run lint",
     "typecheck:web": "npm --workspace apps/web run typecheck",
     "typecheck:db": "npm --workspace packages/db run typecheck",
-    "test:backend": "python -m unittest discover -s services/api/tests",
-    "validate": "npm run typecheck:web && npm run typecheck:db && npm run test:backend"
+    "db:extensions": "npm --workspace packages/db run db:extensions",
+    "db:indexes": "npm --workspace packages/db run db:indexes",
+    "db:generate": "npm --workspace packages/db run db:generate",
+    "db:migrate": "npm --workspace packages/db run db:migrate",
+    "db:push": "npm --workspace packages/db run db:push",
+    "db:seed": "npm --workspace packages/db run db:seed",
+    "test:frontend": "npm --workspace apps/web run test",
+    "test:backend": "python -m unittest discover -s services/api/tests -p test_*.py",
+    "test:integration": "python -m unittest discover -s services/api/tests/integration",
+    "validate": "npm run typecheck:web && npm run typecheck:db && npm run test:backend && npm run test:frontend"
   },
   "workspaces": [
     "apps/web",

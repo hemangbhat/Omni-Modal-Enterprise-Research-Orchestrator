@@ -1,0 +1,34 @@
+{
+  "mcpServers": {
+    "fetch": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-fetch"
+      ],
+      "env": {},
+      "disabled": true,
+      "autoApprove": []
+    },
+    "stitch": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@_davideast/stitch-mcp",
+        "proxy"
+      ],
+      "env": {
+        "STITCH_API_KEY": "AQ.Ab8RN6I_y8LIXX60LclvVhmACyBRmRfkXiu3VqVmr6FEep5T_g",
+        "GOOGLE_CLOUD_PROJECT": "1518355900743496989"
+      },
+      "autoApprove": [
+        "get_screen",
+        "get_screen",
+        "get_screen",
+        "get_screen",
+        "get_screen",
+        "get_screen",
+        "download_assets"
+      ]
+    }
+  }
+}

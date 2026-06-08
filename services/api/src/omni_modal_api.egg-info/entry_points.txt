@@ -1,0 +1,3 @@
+[console_scripts]
+omni-entities = omni_modal.entity_extraction.cli:main
+omni-mcp = omni_modal.mcp.cli:main

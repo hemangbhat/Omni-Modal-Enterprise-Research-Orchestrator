@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  backend-tests:
+    name: Backend Tests (Python)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/api
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[db,observability,performance]"
+
+      - name: Install optional ML deps for tests
+        run: pip install sentence-transformers || true
+
+      - name: Run backend tests
+        env:
+          JWT_SECRET: "ci-test-secret-${{ github.run_id }}"
+          ENVIRONMENT: ci
+        run: |
+          # Unit/property tests (fast, no server started)
+          python -m unittest discover -s tests -p "test_*.py" -v
+          # Integration tests (starts a real HTTP server)
+          python -m unittest discover -s tests/integration -v
+
+  frontend-typecheck:
+    name: Frontend TypeCheck + Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: TypeScript check
+        run: npm run typecheck:web
+
+      - name: Frontend unit tests (Vitest)
+        run: npm run test:frontend
+
+  security-check:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check .env is not committed
+        run: |
+          if git ls-files --error-unmatch .env 2>/dev/null; then
+            echo "ERROR: .env file is committed to the repository!"
+            exit 1
+          else
+            echo ".env is not committed — OK"
+          fi

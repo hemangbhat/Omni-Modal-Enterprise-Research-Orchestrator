@@ -5,12 +5,20 @@
   "type": "module",
   "main": "./src/index.ts",
   "scripts": {
+    "db:extensions": "node scripts/enable-extensions.mjs",
+    "db:indexes": "node scripts/create-vector-index.mjs",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:push": "drizzle-kit push",
+    "db:seed": "node scripts/seed.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.0.2",
     "drizzle-orm": "^0.45.2"
   },
   "devDependencies": {
+    "drizzle-kit": "^0.31.10",
     "typescript": "^5.7.0"
   }
 }

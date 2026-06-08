@@ -16,12 +16,14 @@ class Phase1OrchestratorTest(unittest.TestCase):
             adk_project_id_configured=False,
             a2a_delegation_endpoint_configured=False,
             gemini_interactions_endpoint_configured=False,
+            embedding_backend="hashing",
+            embedding_backend_configured=True,
         )
 
         snapshot = Phase1Orchestrator(settings).health()
         serialized = repr(snapshot)
 
-        self.assertEqual(snapshot["phase"], 1)
+        self.assertEqual(snapshot["phase"], 12)
         self.assertEqual(snapshot["status"], "ok")
         self.assertIn("components", snapshot)
         self.assertNotIn("postgresql://", serialized)

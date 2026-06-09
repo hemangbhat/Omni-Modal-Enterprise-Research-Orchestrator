@@ -8,7 +8,6 @@ import { apiRequest } from "@/lib/api-client";
 import { getClientApiConfig } from "@/lib/env";
 
 type ProjectStatus = "Active" | "Completed";
-type Priority = "High" | "Medium" | "Low";
 
 type LiveProject = {
   id: string;
@@ -16,17 +15,10 @@ type LiveProject = {
   name: string;
   icon: string;
   status: ProjectStatus;
-  priority: Priority;
   source_kind: string;
   chunk_count: number;
   updated: string;
   docs: number;
-};
-
-const priorityMeta: Record<Priority, { icon: string; className: string }> = {
-  High: { icon: "keyboard_double_arrow_up", className: "text-error" },
-  Medium: { icon: "remove", className: "text-on-surface-variant" },
-  Low: { icon: "arrow_downward", className: "text-on-surface-variant opacity-70" },
 };
 
 function ProjectStatusBadge({ status }: { status: ProjectStatus }) {
@@ -164,7 +156,6 @@ export default function ProjectsPage() {
                     <tbody className="divide-y divide-outline-variant/50 font-body-md text-body-md text-on-surface">
                       {filtered.map((project) => {
                         const active = project.id === selectedId;
-                        const prio = priorityMeta[project.priority];
                         return (
                           <tr
                             key={project.id}

@@ -124,19 +124,39 @@ class GeminiAnswerSynthesizer:
 
 
 def select_answer_synthesizer():
-    """Return the Gemini synthesizer when configured + enabled, else extractive."""
+    """Return the best available synthesizer: Groq → Gemini → extractive."""
     enabled = os.environ.get("LLM_ANSWER_GENERATION_ENABLED", "true").lower() != "false"
-    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if enabled and api_key:
+    if not enabled:
+        return ExtractiveAnswerSynthesizer()
+
+    # Groq (free tier, fast, OpenAI-compat)
+    groq_key = os.environ.get("GROQ_API_KEY", "").strip()
+    if groq_key:
+        try:
+            from omni_modal.qa.groq_synthesis import GroqAnswerSynthesizer  # noqa: PLC0415
+
+            return GroqAnswerSynthesizer(
+                api_key=groq_key,
+                model=os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
+            )
+        except Exception as exc:  # pragma: no cover
+            observability.capture_message(
+                f"GROQ_API_KEY set but Groq synthesizer unavailable ({exc}); trying Gemini.",
+                operation="qa.groq.select", level="warning",
+            )
+
+    # Gemini (free tier with quota, or paid)
+    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if gemini_key:
         try:
             return GeminiAnswerSynthesizer(
-                api_key=api_key,
+                api_key=gemini_key,
                 model=os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"),
             )
-        except Exception as exc:  # pragma: no cover - defensive
+        except Exception as exc:  # pragma: no cover
             observability.capture_message(
-                f"GEMINI_API_KEY set but synthesizer unavailable ({exc}); using extractive.",
-                operation="qa.gemini.select",
-                level="warning",
+                f"GEMINI_API_KEY set but Gemini synthesizer unavailable ({exc}); using extractive.",
+                operation="qa.gemini.select", level="warning",
             )
+
     return ExtractiveAnswerSynthesizer()

@@ -87,20 +87,32 @@ class GeminiSynthesisTests(unittest.TestCase):
         self.assertEqual(resp.status, "no_data")
 
     def test_select_returns_extractive_without_key(self) -> None:
-        saved = os.environ.pop("GEMINI_API_KEY", None)
+        saved_groq = os.environ.pop("GROQ_API_KEY", None)
+        saved_gemini = os.environ.pop("GEMINI_API_KEY", None)
         try:
             self.assertIsInstance(select_answer_synthesizer(), ExtractiveAnswerSynthesizer)
         finally:
-            if saved is not None:
-                os.environ["GEMINI_API_KEY"] = saved
+            if saved_groq is not None:
+                os.environ["GROQ_API_KEY"] = saved_groq
+            if saved_gemini is not None:
+                os.environ["GEMINI_API_KEY"] = saved_gemini
 
     def test_select_returns_extractive_when_disabled(self) -> None:
-        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "k", "LLM_ANSWER_GENERATION_ENABLED": "false"}):
+        with mock.patch.dict(os.environ, {"GROQ_API_KEY": "k", "LLM_ANSWER_GENERATION_ENABLED": "false"}):
             self.assertIsInstance(select_answer_synthesizer(), ExtractiveAnswerSynthesizer)
 
-    def test_select_returns_gemini_when_enabled_with_key(self) -> None:
-        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "k", "LLM_ANSWER_GENERATION_ENABLED": "true"}):
-            self.assertIsInstance(select_answer_synthesizer(), GeminiAnswerSynthesizer)
+    def test_select_returns_gemini_when_no_groq_key(self) -> None:
+        env = {"GEMINI_API_KEY": "k", "LLM_ANSWER_GENERATION_ENABLED": "true"}
+        env.pop("GROQ_API_KEY", None)
+        with mock.patch.dict(os.environ, env, clear=False):
+            os.environ.pop("GROQ_API_KEY", None)
+            result = select_answer_synthesizer()
+        self.assertIsInstance(result, GeminiAnswerSynthesizer)
+
+    def test_select_returns_groq_when_groq_key_set(self) -> None:
+        from omni_modal.qa.groq_synthesis import GroqAnswerSynthesizer
+        with mock.patch.dict(os.environ, {"GROQ_API_KEY": "gsk_test", "LLM_ANSWER_GENERATION_ENABLED": "true"}):
+            self.assertIsInstance(select_answer_synthesizer(), GroqAnswerSynthesizer)
 
 
 if __name__ == "__main__":

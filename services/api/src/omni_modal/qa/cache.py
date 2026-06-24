@@ -39,8 +39,14 @@ class QueryCache:
         *,
         maxsize: int = 256,
         ttl: float = 300.0,
-        enabled: bool = True,
+        enabled: bool | None = None,
     ) -> None:
+        # When ``enabled`` is not explicitly provided, resolve it from the
+        # QUERY_CACHE_ENABLED environment variable (default "true").  Setting
+        # QUERY_CACHE_ENABLED=false disables the cache so the retriever always
+        # executes a live database query (Requirement 4.6).
+        if enabled is None:
+            enabled = os.environ.get("QUERY_CACHE_ENABLED", "true").lower() != "false"
         self._enabled = enabled
         self._lock = threading.Lock()
         self._tenant_keys: dict[str, set[CacheKey]] = {}

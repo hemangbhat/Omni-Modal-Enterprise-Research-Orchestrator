@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
 import { AppShell } from "@/components/app-shell";
+import { AuthProvider } from "@/components/auth-context";
 import { SentryErrorBoundary } from "@/components/sentry-error-boundary";
 import { initSentry } from "@/lib/sentry";
 import "./globals.css";
@@ -36,7 +37,9 @@ export default function RootLayout({
       </head>
       <body>
         <SentryErrorBoundary>
-          <AppShell>{children}</AppShell>
+          <AuthProvider>
+            <AppShell>{children}</AppShell>
+          </AuthProvider>
         </SentryErrorBoundary>
       </body>
     </html>

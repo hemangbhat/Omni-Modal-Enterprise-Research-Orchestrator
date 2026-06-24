@@ -29,14 +29,16 @@ export function getPhaseOneComponents(): PhaseComponent[] {
       description: "Local transcription interface only; model runtime is not wired."
     },
     {
-      name: "QLoRA entity extraction",
-      status: "deferred",
-      description: "Extractor interface only; model artifact is not wired."
+      name: "Entity extraction (NER)",
+      status: "ready",
+      description:
+        "Rule-based extractor by default; optional pretrained Hugging Face NER model (dslim/bert-base-NER). A QLoRA fine-tuning pipeline is scaffolded but no fine-tuned weights are trained."
     },
     {
       name: "ADK and external delegation",
       status: "deferred",
-      description: "Capability boundary only; no ADK, A2A, or Gemini calls yet."
+      description:
+        "Deterministic orchestration graph (not multi-agent). External A2A/Gemini delegation is implemented but disabled unless an endpoint is configured."
     }
   ];
 }

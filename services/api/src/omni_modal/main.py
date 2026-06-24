@@ -4,11 +4,24 @@ import base64
 import hashlib
 import json
 import os
+import time
 import tempfile
 import uuid
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import atexit
+
+# Load the repository .env BEFORE importing anything that reads os.environ at
+# import time (observability, embedding/DB selection, JWT secret, etc.), but
+# ONLY when this module is launched as the server entry point
+# (`python -m omni_modal.main`). When imported as a module (e.g. by tests),
+# the caller controls the environment explicitly, so we must not clobber it.
+# Process environment variables always take precedence over .env values.
+if __name__ == "__main__":
+    from omni_modal.env_loader import load_dotenv
+
+    load_dotenv()
+
 from omni_modal.observability import observability
 observability.init()
 atexit.register(observability.flush)
@@ -29,6 +42,7 @@ from omni_modal.qa import (
     PgVectorChunkRetriever,
     QueryContractError,
     query_request_from_payload,
+    select_answer_synthesizer,
     select_embedding_provider,
     stream_markdown,
 )
@@ -39,15 +53,19 @@ from omni_modal.qa.in_memory_store import (
 )
 from omni_modal.qa.cache import QueryCache
 from omni_modal.db.pool import get_connection_pool, close_connection_pool, reset_pool_for_testing
-from omni_modal.security.auth import verify_jwt, jwt_secret_from_env, AuthError, JwtClaims
+from omni_modal.security.auth import verify_jwt, jwt_secret_from_env, AuthError, JwtClaims, _make_jwt
+from omni_modal.security.accounts import AccountError, get_account_service
 from omni_modal.security.rbac import assert_endpoint_roles, RbacError
 from omni_modal.security.audit import InMemoryAuditSink
+from omni_modal.security.pg_audit_sink import select_audit_sink
 from omni_modal.security.rate_limiting import SlidingWindowRateLimiter, RateLimitExceeded
 from omni_modal.security.input_validation import (
     ValidationError, assert_body_size, assert_query_length, assert_tenant_id, assert_document_id_uuid,
     MAX_BODY_BYTES,
 )
 from omni_modal.mcp.models import ToolContext
+from omni_modal.saas import get_saas_service
+from omni_modal.saas.plans import PlanLimitExceeded
 
 
 class OmniModalHandler(BaseHTTPRequestHandler):
@@ -86,17 +104,26 @@ class OmniModalHandler(BaseHTTPRequestHandler):
     _audio_transcriber = LocalWhisperTranscriber(model=_whisper_model) if _whisper_model else None
 
     if _connection_pool is not None or os.environ.get("DATABASE_URL"):
-        # Postgres + pgvector path. Ingestion persistence to pgvector is not yet
-        # wired (BatchEmbedder exists but document-row creation is out of scope
-        # here); retrieval reads whatever has been seeded into the DB.
+        # Postgres + pgvector path. Ingestion now persists end-to-end:
+        # documents → document_chunks → embeddings (vector), so the pgvector
+        # retriever performs genuine semantic search over ingested content.
         _vector_store = None
         _retriever = PgVectorChunkRetriever(
             _embedding_provider,
             pool=_connection_pool,
             cache=_query_cache,
         )
+        from omni_modal.qa.pg_persistence import PostgresChunkPersistence  # noqa: PLC0415
+
         _ingestion_pipeline = MultimodalIngestionPipeline(
             audio_transcriber=_audio_transcriber,
+            persistence=PostgresChunkPersistence(
+                _embedding_provider,
+                pool=_connection_pool,
+                database_url=os.environ.get("DATABASE_URL"),
+                embedding_model=_embedding_selection.backend,
+                dimensions=getattr(_embedding_provider, "dimensions", 384),
+            ),
         )
     else:
         # Local, Postgres-free demo path: a single in-memory vector store is
@@ -121,9 +148,15 @@ class OmniModalHandler(BaseHTTPRequestHandler):
     research_workflow = InternalResearchAdkWorkflow(
         _retriever,
         external_client_from_environment(),
+        select_answer_synthesizer(),
     )
-    _audit_sink = InMemoryAuditSink()
+    _audit_sink = select_audit_sink()
     _rate_limiter = SlidingWindowRateLimiter()
+    _account_service = get_account_service()
+
+    # SaaS layer: orgs/workspaces, usage metering, notifications, billing (demo),
+    # and optional adapters. Seeded with a demo org so the UI is never empty.
+    _saas = get_saas_service()
 
     # ── Startup log — printed to stdout so it's visible in logs / Docker ─────
     try:
@@ -138,7 +171,7 @@ class OmniModalHandler(BaseHTTPRequestHandler):
             f"  Retrieval path : {_active_path}\n"
             f"  Embedding      : {_embed_backend} ({_embed_dims}-dim){_fell_back}\n"
             f"  Whisper model  : {os.environ.get('WHISPER_MODEL_PATH', 'not set')}\n"
-            f"  NER model      : {os.environ.get('QLORA_ENTITY_MODEL_PATH', 'rule-based (no model)')}\n"
+            f"  NER model      : {os.environ.get('ENTITY_NER_MODEL_PATH') or os.environ.get('QLORA_ENTITY_MODEL_PATH', 'rule-based (no model)')}\n"
             f"  Sentry         : {'enabled' if os.environ.get('SENTRY_DSN') else 'disabled'}\n"
             f"{'─'*60}\n",
             file=_sys.stderr,
@@ -235,18 +268,48 @@ class OmniModalHandler(BaseHTTPRequestHandler):
                         "error_message": job.error_message,
                     })
                     return
-                if self.path == "/documents":
-                    self._handle_list_documents(claims=claims)
+                # Split path and query string for the remaining routes.
+                from urllib.parse import urlparse, parse_qs  # noqa: PLC0415
+                parsed = urlparse(self.path)
+                path_only = parsed.path
+                query = parse_qs(parsed.query)
+                workspace_id = (query.get("workspace_id") or [None])[0]
+                if path_only == "/documents":
+                    self._handle_list_documents(claims=claims, workspace_id=workspace_id)
                     return
-                if self.path.startswith("/entities/"):
-                    document_id = self.path[len("/entities/"):]
+                if path_only.startswith("/entities/"):
+                    document_id = path_only[len("/entities/"):]
                     self._handle_list_entities(document_id=document_id, claims=claims)
                     return
-                if self.path == "/projects":
-                    self._handle_list_projects(claims=claims)
+                if path_only == "/projects":
+                    self._handle_list_projects(claims=claims, workspace_id=workspace_id)
                     return
-                if self.path == "/archives":
-                    self._handle_list_archives(claims=claims)
+                if path_only == "/archives":
+                    self._handle_list_archives(claims=claims, workspace_id=workspace_id)
+                    return
+                if path_only == "/workspaces":
+                    self._handle_list_workspaces(claims=claims)
+                    return
+                if path_only == "/usage":
+                    self._handle_usage(claims=claims)
+                    return
+                if path_only == "/members":
+                    self._handle_list_members(claims=claims)
+                    return
+                if path_only == "/notifications":
+                    self._handle_list_notifications(claims=claims)
+                    return
+                if path_only == "/plans":
+                    self._handle_list_plans(claims=claims)
+                    return
+                if path_only == "/billing":
+                    self._handle_billing(claims=claims)
+                    return
+                if path_only == "/invites/preview":
+                    self._handle_preview_invite(token=(query.get("token") or [""])[0])
+                    return
+                if path_only == "/admin/stats":
+                    self._handle_admin_stats(claims=claims)
                     return
                 if self.path != "/health":
                     self.send_response(404)
@@ -262,6 +325,21 @@ class OmniModalHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         trace_headers = self._get_trace_headers()
         with observability.continue_trace(trace_headers):
+            # Stripe webhook is unauthenticated (Stripe can't send a JWT); it is
+            # verified by signature inside the handler. Must run before auth.
+            if self.path == "/billing/webhook":
+                self._handle_stripe_webhook()
+                return
+
+            # Auth endpoints are unauthenticated (they mint the token). Must run
+            # before _authenticate.
+            if self.path == "/auth/register":
+                self._handle_auth_register()
+                return
+            if self.path == "/auth/login":
+                self._handle_auth_login()
+                return
+
             # 1. Authentication
             claims = self._authenticate()
             if claims is None:
@@ -302,6 +380,30 @@ class OmniModalHandler(BaseHTTPRequestHandler):
                 return
             if self.path == "/ingest/upload":
                 self._handle_upload(claims=claims, tool_context=tool_context)
+                return
+            if self.path == "/workspaces":
+                self._handle_create_workspace(claims=claims)
+                return
+            if self.path == "/invites":
+                self._handle_create_invite(claims=claims)
+                return
+            if self.path == "/invites/accept":
+                self._handle_accept_invite(claims=claims)
+                return
+            if self.path == "/billing/change-plan":
+                self._handle_change_plan(claims=claims)
+                return
+            if self.path == "/billing/checkout":
+                self._handle_billing_checkout(claims=claims)
+                return
+            if self.path == "/billing/confirm":
+                self._handle_billing_confirm(claims=claims)
+                return
+            if self.path == "/billing/portal":
+                self._handle_billing_portal(claims=claims)
+                return
+            if self.path == "/notifications/read":
+                self._handle_mark_notifications_read(claims=claims)
                 return
             if self.path != "/ingest/local":
                 self.send_response(404)
@@ -355,20 +457,24 @@ class OmniModalHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self._write_json(500, {"status": "error", "error": str(exc)})
 
-    def _handle_list_projects(self, claims: JwtClaims | None) -> None:
+    def _handle_list_projects(self, claims: JwtClaims | None, workspace_id: str | None = None) -> None:
         """GET /projects — return research projects derived from ingested documents.
 
         Groups documents by tenant and synthesises a project view. In production
         this would read from a projects table; here we derive projects from the
         documents present in the system so the page always shows real data.
+        When ``workspace_id`` is set, only that workspace's documents are shown.
         """
         tenant_id = claims.tenant_id if claims else "demo-tenant"
+        ws_filter = self._saas.documents_in_workspace(workspace_id) if workspace_id else None
         projects: list[dict[str, object]] = []
 
         if self._vector_store is not None:
             # Derive projects from ingested document metadata
             doc_map: dict[str, dict[str, object]] = {}
             for chunk in self._vector_store.for_tenant(tenant_id):
+                if ws_filter is not None and chunk.document_id not in ws_filter:
+                    continue
                 doc_id = chunk.document_id
                 if doc_id not in doc_map:
                     doc_map[doc_id] = {
@@ -432,20 +538,24 @@ class OmniModalHandler(BaseHTTPRequestHandler):
 
         self._write_json(200, {"projects": projects, "total": len(projects)})
 
-    def _handle_list_archives(self, claims: JwtClaims | None) -> None:
+    def _handle_list_archives(self, claims: JwtClaims | None, workspace_id: str | None = None) -> None:
         """GET /archives — return completed/archived documents as archive records.
 
         For the in-memory path: completed documents that have been indexed are
         shown as cold-storage archives. In production this would read from a
-        dedicated archives table with retention metadata.
+        dedicated archives table with retention metadata. When ``workspace_id``
+        is set, only that workspace's documents are shown.
         """
         tenant_id = claims.tenant_id if claims else "demo-tenant"
+        ws_filter = self._saas.documents_in_workspace(workspace_id) if workspace_id else None
         archives: list[dict[str, object]] = []
 
         if self._vector_store is not None:
             # All indexed documents are eligible to be shown as archives
             seen: dict[str, dict[str, object]] = {}
             for chunk in self._vector_store.for_tenant(tenant_id):
+                if ws_filter is not None and chunk.document_id not in ws_filter:
+                    continue
                 if chunk.document_id not in seen:
                     seen[chunk.document_id] = {
                         "id": chunk.document_id,
@@ -493,20 +603,22 @@ class OmniModalHandler(BaseHTTPRequestHandler):
 
         self._write_json(200, {"archives": archives, "total": len(archives)})
 
-    def _handle_list_documents(self, claims: JwtClaims | None) -> None:
+    def _handle_list_documents(self, claims: JwtClaims | None, workspace_id: str | None = None) -> None:
         """GET /documents — list all ingested documents for the caller's tenant.
 
-        Returns documents from the in-memory vector store (or an empty list if
-        the pgvector path is active and no documents have been seeded). Each
-        entry includes: document_id, title, source_kind, chunk_count, status.
+        When ``workspace_id`` is provided, only documents tagged to that
+        workspace are returned (real workspace scoping).
         """
         tenant_id = claims.tenant_id if claims else "demo-tenant"
+        ws_filter = self._saas.documents_in_workspace(workspace_id) if workspace_id else None
         docs: list[dict[str, object]] = []
 
         if self._vector_store is not None:
             # In-memory path: derive unique documents from the chunk store
             seen: dict[str, dict[str, object]] = {}
             for chunk in self._vector_store.for_tenant(tenant_id):
+                if ws_filter is not None and chunk.document_id not in ws_filter:
+                    continue
                 if chunk.document_id not in seen:
                     seen[chunk.document_id] = {
                         "document_id": chunk.document_id,
@@ -587,6 +699,16 @@ class OmniModalHandler(BaseHTTPRequestHandler):
             )
             return
 
+        # Usage metering + plan gating (monthly upload quota).
+        try:
+            self._saas.record_usage(
+                tenant_id=claims.tenant_id, user_id=claims.user_id, metric="uploads"
+            )
+        except PlanLimitExceeded as exc:
+            self._write_json(402, {"error": str(exc), "metric": exc.metric,
+                                   "limit": exc.limit, "upgrade_required": True})
+            return
+
         try:
             payload = self._read_json_body()
         except json.JSONDecodeError:
@@ -638,7 +760,415 @@ class OmniModalHandler(BaseHTTPRequestHandler):
             {"job_id": job.id, "document_id": document_id, "tenant_id": claims.tenant_id,
              "file_name": filename},
         )
+        # Tag the document to the active workspace (real workspace scoping).
+        ws = payload.get("workspace_id")
+        if isinstance(ws, str) and ws:
+            self._saas.tag_document(document_id, ws)
+        self._saas.analytics.capture(
+            event="upload", tenant_id=claims.tenant_id, user_id=claims.user_id,
+            properties={"source_kind": payload.get("source_kind", "pdf")},
+        )
+        self._saas.notifications.add(
+            tenant_id=claims.tenant_id, title="Upload received",
+            body=f"'{payload.get('title') or filename}' is being processed.",
+            kind="info", user_id=claims.user_id,
+        )
         self._write_json(202, {"job_id": job.id, "status": job.status, "document_id": document_id})
+
+    def _handle_list_workspaces(self, claims: JwtClaims | None) -> None:
+        """GET /workspaces — list workspaces in the caller's organization."""
+        tenant_id = claims.tenant_id if claims else "demo-tenant"
+        user_id = claims.user_id if claims else "demo-user"
+        org = self._saas.ensure_org(tenant_id, owner_user_id=user_id)
+        workspaces = [w.to_dict() for w in self._saas.workspaces.list_workspaces(org.id)]
+        self._write_json(200, {
+            "organization": org.to_dict(),
+            "workspaces": workspaces,
+            "total": len(workspaces),
+        })
+
+    def _handle_usage(self, claims: JwtClaims | None) -> None:
+        """GET /usage — current plan + monthly usage vs limits."""
+        tenant_id = claims.tenant_id if claims else "demo-tenant"
+        user_id = claims.user_id if claims else "demo-user"
+        self._saas.ensure_org(tenant_id, owner_user_id=user_id)
+        self._write_json(200, self._saas.usage_report(tenant_id))
+
+    def _handle_list_members(self, claims: JwtClaims | None) -> None:
+        """GET /members — team members and pending invites for the org."""
+        tenant_id = claims.tenant_id if claims else "demo-tenant"
+        user_id = claims.user_id if claims else "demo-user"
+        org = self._saas.ensure_org(tenant_id, owner_user_id=user_id)
+        members = [m.to_dict() for m in self._saas.workspaces.list_members(org.id)]
+        invites = [
+            i.to_dict() for i in self._saas.workspaces.list_invites(org.id)
+            if i.status == "pending"
+        ]
+        self._write_json(200, {"members": members, "invites": invites,
+                               "total": len(members)})
+
+    def _handle_list_notifications(self, claims: JwtClaims | None) -> None:
+        """GET /notifications — notifications for the caller."""
+        tenant_id = claims.tenant_id if claims else "demo-tenant"
+        user_id = claims.user_id if claims else None
+        notes = self._saas.notifications.list_for(tenant_id, user_id=user_id)
+        self._write_json(200, {
+            "notifications": [n.to_dict() for n in notes],
+            "unread": self._saas.notifications.unread_count(tenant_id, user_id=user_id),
+            "total": len(notes),
+        })
+
+    def _handle_list_plans(self, claims: JwtClaims | None) -> None:
+        """GET /plans — available subscription plans."""
+        from omni_modal.saas.plans import PLANS  # noqa: PLC0415
+        self._write_json(200, {"plans": [p.to_dict() for p in PLANS.values()]})
+
+    def _handle_billing(self, claims: JwtClaims | None) -> None:
+        """GET /billing — current plan, billing mode (honest), and usage."""
+        from omni_modal.saas.plans import PLANS  # noqa: PLC0415
+        tenant_id = claims.tenant_id if claims else "demo-tenant"
+        user_id = claims.user_id if claims else "demo-user"
+        org = self._saas.ensure_org(tenant_id, owner_user_id=user_id)
+        self._write_json(200, {
+            "billing_mode": self._saas.billing_mode(),
+            "current_plan": org.plan_id,
+            "plans": [p.to_dict() for p in PLANS.values()],
+            "usage": self._saas.usage_report(tenant_id),
+        })
+
+    def _handle_admin_stats(self, claims: JwtClaims | None) -> None:
+        """GET /admin/stats — admin-only operational dashboard data."""
+        if claims is None or "admin" not in claims.roles:
+            self._write_json(403, {"error": "Endpoint /admin/stats requires the admin role."})
+            return
+        tenant_id = claims.tenant_id
+        org = self._saas.ensure_org(tenant_id, owner_user_id=claims.user_id)
+        analytics = self._saas.analytics
+        event_counts = analytics.event_counts() if hasattr(analytics, "event_counts") else {}
+        self._write_json(200, {
+            "organization": org.to_dict(),
+            "members": self._saas.workspaces.count_members(org.id),
+            "workspaces": self._saas.workspaces.count_workspaces(org.id),
+            "usage": self._saas.usage.snapshot(tenant_id),
+            "event_counts": event_counts,
+            "adapters": {
+                "storage": self._saas.storage.backend,
+                "email": self._saas.email.backend,
+                "analytics": self._saas.analytics.backend,
+            },
+            "audit_events": len(self._audit_sink.entries),
+            "billing_mode": self._saas.billing_mode(),
+        })
+
+    def _handle_create_workspace(self, claims: JwtClaims) -> None:
+        """POST /workspaces — create a workspace (plan-limited)."""
+        try:
+            assert_endpoint_roles("/workspaces", claims.roles)
+        except RbacError as exc:
+            self._write_json(403, {"error": str(exc)})
+            return
+        try:
+            payload = self._read_json_body()
+        except json.JSONDecodeError:
+            self._write_json(400, {"error": "Invalid JSON body."})
+            return
+        name = payload.get("name")
+        if not isinstance(name, str) or not name.strip():
+            self._write_json(400, {"error": "name is required."})
+            return
+        try:
+            ws = self._saas.create_workspace(
+                tenant_id=claims.tenant_id, user_id=claims.user_id, name=name.strip()
+            )
+        except PlanLimitExceeded as exc:
+            self._write_json(402, {"error": str(exc), "metric": exc.metric,
+                                   "limit": exc.limit, "upgrade_required": True})
+            return
+        self._write_json(201, ws.to_dict())
+
+    def _handle_create_invite(self, claims: JwtClaims) -> None:
+        """POST /invites — invite a team member (admin only, plan-limited)."""
+        try:
+            assert_endpoint_roles("/invites", claims.roles)
+        except RbacError as exc:
+            self._write_json(403, {"error": str(exc)})
+            return
+        try:
+            payload = self._read_json_body()
+        except json.JSONDecodeError:
+            self._write_json(400, {"error": "Invalid JSON body."})
+            return
+        email = payload.get("email")
+        role = payload.get("role", "researcher")
+        if not isinstance(email, str) or "@" not in email:
+            self._write_json(400, {"error": "A valid email is required."})
+            return
+        if role not in ("researcher", "admin", "auditor"):
+            self._write_json(400, {"error": "role must be researcher, admin, or auditor."})
+            return
+        try:
+            invite = self._saas.invite_member(
+                tenant_id=claims.tenant_id, user_id=claims.user_id, email=email, role=role
+            )
+        except PlanLimitExceeded as exc:
+            self._write_json(402, {"error": str(exc), "metric": exc.metric,
+                                   "limit": exc.limit, "upgrade_required": True})
+            return
+        # Return a shareable accept link (token included) so the admin can copy
+        # it directly — useful in console-email/demo mode where the email isn't
+        # actually delivered. This mirrors how real SaaS tools surface invite links.
+        body = invite.to_dict(include_token=True)
+        body["accept_url"] = f"/accept-invite?token={invite.token}"
+        self._write_json(201, body)
+
+    def _handle_change_plan(self, claims: JwtClaims) -> None:
+        """POST /billing/change-plan — change subscription plan (admin only, demo)."""
+        try:
+            assert_endpoint_roles("/billing/change-plan", claims.roles)
+        except RbacError as exc:
+            self._write_json(403, {"error": str(exc)})
+            return
+        try:
+            payload = self._read_json_body()
+        except json.JSONDecodeError:
+            self._write_json(400, {"error": "Invalid JSON body."})
+            return
+        plan_id = payload.get("plan_id")
+        org = self._saas.change_plan(
+            tenant_id=claims.tenant_id, user_id=claims.user_id, plan_id=str(plan_id)
+        )
+        if org is None:
+            self._write_json(400, {"error": f"Unknown plan_id: {plan_id!r}."})
+            return
+        self._write_json(200, {
+            "organization": org.to_dict(),
+            "billing_mode": self._saas.billing_mode(),
+        })
+
+    def _billing_urls(self) -> tuple[str, str]:
+        """Return (success_base, cancel_url) for Stripe redirects.
+
+        Uses APP_BASE_URL (frontend origin) so Stripe returns the user to the
+        billing page. Falls back to localhost:3000 for local dev.
+        """
+        app_base = os.environ.get("APP_BASE_URL", "http://localhost:3000").rstrip("/")
+        success_url = f"{app_base}/billing?status=success&session_id={{CHECKOUT_SESSION_ID}}"
+        cancel_url = f"{app_base}/billing?status=cancelled"
+        return success_url, cancel_url
+
+    def _handle_billing_checkout(self, claims: JwtClaims) -> None:
+        """POST /billing/checkout — start a Stripe Checkout for a paid plan."""
+        try:
+            assert_endpoint_roles("/billing/checkout", claims.roles)
+        except RbacError as exc:
+            self._write_json(403, {"error": str(exc)})
+            return
+        try:
+            payload = self._read_json_body()
+        except json.JSONDecodeError:
+            self._write_json(400, {"error": "Invalid JSON body."})
+            return
+        plan_id = str(payload.get("plan_id", ""))
+        success_url, cancel_url = self._billing_urls()
+        try:
+            result = self._saas.start_checkout(
+                tenant_id=claims.tenant_id, user_id=claims.user_id, plan_id=plan_id,
+                success_url=success_url, cancel_url=cancel_url,
+            )
+        except RuntimeError as exc:
+            # Demo billing active — no Stripe checkout available.
+            self._write_json(409, {"error": str(exc), "billing_mode": self._saas.billing_mode()})
+            return
+        except Exception as exc:  # Stripe API error
+            observability.capture_exception(exc, operation="billing_checkout")
+            self._write_json(502, {"error": f"Stripe checkout failed: {exc}"})
+            return
+        if result is None:
+            self._write_json(400, {"error": f"Plan {plan_id!r} is not purchasable."})
+            return
+        self._write_json(200, result)
+
+    def _handle_billing_confirm(self, claims: JwtClaims) -> None:
+        """POST /billing/confirm — verify a returned Checkout session, apply plan."""
+        try:
+            assert_endpoint_roles("/billing/confirm", claims.roles)
+        except RbacError as exc:
+            self._write_json(403, {"error": str(exc)})
+            return
+        try:
+            payload = self._read_json_body()
+        except json.JSONDecodeError:
+            self._write_json(400, {"error": "Invalid JSON body."})
+            return
+        session_id = str(payload.get("session_id", ""))
+        if not session_id:
+            self._write_json(400, {"error": "session_id is required."})
+            return
+        try:
+            result = self._saas.confirm_checkout(
+                tenant_id=claims.tenant_id, user_id=claims.user_id, session_id=session_id,
+            )
+        except RuntimeError as exc:
+            self._write_json(409, {"error": str(exc)})
+            return
+        except Exception as exc:
+            observability.capture_exception(exc, operation="billing_confirm")
+            self._write_json(502, {"error": f"Stripe confirm failed: {exc}"})
+            return
+        self._write_json(200, result or {"paid": False})
+
+    def _handle_billing_portal(self, claims: JwtClaims) -> None:
+        """POST /billing/portal — open the Stripe Billing Portal."""
+        try:
+            assert_endpoint_roles("/billing/portal", claims.roles)
+        except RbacError as exc:
+            self._write_json(403, {"error": str(exc)})
+            return
+        app_base = os.environ.get("APP_BASE_URL", "http://localhost:3000").rstrip("/")
+        try:
+            result = self._saas.start_portal(
+                tenant_id=claims.tenant_id, user_id=claims.user_id,
+                return_url=f"{app_base}/billing",
+            )
+        except RuntimeError as exc:
+            self._write_json(409, {"error": str(exc), "billing_mode": self._saas.billing_mode()})
+            return
+        except Exception as exc:
+            observability.capture_exception(exc, operation="billing_portal")
+            self._write_json(502, {"error": f"Stripe portal failed: {exc}"})
+            return
+        if result is None:
+            self._write_json(409, {"error": "No Stripe customer yet. Subscribe to a paid plan first."})
+            return
+        self._write_json(200, result)
+
+    def _issue_login_token(self, account) -> dict:
+        """Sign a backend JWT for an authenticated account (7-day expiry)."""
+        exp = int(time.time()) + 7 * 24 * 3600
+        token = _make_jwt(
+            account.tenant_id, account.user_id, list(account.roles), exp,
+            jwt_secret_from_env(),
+        )
+        return {
+            "token": token,
+            "tenant_id": account.tenant_id,
+            "user_id": account.user_id,
+            "roles": list(account.roles),
+            "email": account.email,
+            "expires_at": exp,
+        }
+
+    def _handle_auth_register(self) -> None:
+        """POST /auth/register — create an account, return a signed JWT."""
+        try:
+            payload = self._read_json_body()
+        except json.JSONDecodeError:
+            self._write_json(400, {"error": "Invalid JSON body."})
+            return
+        email = str(payload.get("email", ""))
+        password = str(payload.get("password", ""))
+        display_name = payload.get("display_name")
+        try:
+            account = self._account_service.register(
+                email=email, password=password,
+                display_name=display_name if isinstance(display_name, str) else None,
+            )
+        except AccountError as exc:
+            self._write_json(409, {"error": str(exc)})
+            return
+        except Exception as exc:
+            observability.capture_exception(exc, operation="auth.register")
+            self._write_json(500, {"error": "Registration failed."})
+            return
+        self._write_json(201, self._issue_login_token(account))
+
+    def _handle_auth_login(self) -> None:
+        """POST /auth/login — verify credentials, return a signed JWT."""
+        try:
+            payload = self._read_json_body()
+        except json.JSONDecodeError:
+            self._write_json(400, {"error": "Invalid JSON body."})
+            return
+        email = str(payload.get("email", ""))
+        password = str(payload.get("password", ""))
+        try:
+            account = self._account_service.authenticate(email=email, password=password)
+        except Exception as exc:
+            observability.capture_exception(exc, operation="auth.login")
+            self._write_json(500, {"error": "Login failed."})
+            return
+        if account is None:
+            self._write_json(401, {"error": "Invalid email or password."})
+            return
+        self._write_json(200, self._issue_login_token(account))
+
+    def _handle_stripe_webhook(self) -> None:
+        """POST /billing/webhook — verified Stripe events (unauthenticated)."""
+        content_length = int(self.headers.get("Content-Length", "0"))
+        payload = self.rfile.read(content_length) if content_length else b""
+        sig_header = self.headers.get("Stripe-Signature", "")
+        billing = self._saas.billing
+        if not getattr(billing, "supports_checkout", False):
+            self._write_json(200, {"received": True, "note": "demo billing — ignored"})
+            return
+        try:
+            event = billing.verify_webhook(payload, sig_header)
+        except Exception as exc:
+            observability.capture_exception(exc, operation="billing_webhook_verify")
+            self._write_json(400, {"error": f"Webhook signature verification failed: {exc}"})
+            return
+        try:
+            self._saas.apply_webhook_event(event)
+        except Exception as exc:
+            observability.capture_exception(exc, operation="billing_webhook_apply")
+            self._write_json(500, {"error": "Webhook processing error."})
+            return
+        self._write_json(200, {"received": True})
+        """GET /invites/preview?token= — redacted invite info for the accept page."""
+        if not token:
+            self._write_json(400, {"error": "token query parameter is required."})
+            return
+        preview = self._saas.preview_invite(token)
+        if preview is None:
+            self._write_json(404, {"error": "Invite not found."})
+            return
+        self._write_json(200, preview)
+
+    def _handle_accept_invite(self, claims: JwtClaims) -> None:
+        """POST /invites/accept — accept an invite token as the signed-in user."""
+        try:
+            payload = self._read_json_body()
+        except json.JSONDecodeError:
+            self._write_json(400, {"error": "Invalid JSON body."})
+            return
+        token = payload.get("token")
+        if not isinstance(token, str) or not token:
+            self._write_json(400, {"error": "token is required."})
+            return
+        member = self._saas.accept_invite(token=token, user_id=claims.user_id)
+        if member is None:
+            self._write_json(410, {"error": "Invite is invalid, expired, or already used."})
+            return
+        self._write_json(200, member.to_dict())
+
+    def _handle_mark_notifications_read(self, claims: JwtClaims) -> None:
+        """POST /notifications/read — mark one or all notifications read."""
+        try:
+            payload = self._read_json_body()
+        except json.JSONDecodeError:
+            self._write_json(400, {"error": "Invalid JSON body."})
+            return
+        tenant_id = claims.tenant_id
+        if payload.get("all"):
+            count = self._saas.notifications.mark_all_read(tenant_id, user_id=claims.user_id)
+            self._write_json(200, {"marked_read": count})
+            return
+        note_id = payload.get("id")
+        if not isinstance(note_id, str):
+            self._write_json(400, {"error": "id is required (or pass all=true)."})
+            return
+        ok = self._saas.notifications.mark_read(tenant_id, note_id)
+        self._write_json(200 if ok else 404, {"marked_read": 1 if ok else 0})
 
     def _handle_query(self, stream: bool, claims: JwtClaims | None = None) -> None:
         tool_context: ToolContext | None = None
@@ -660,6 +1190,17 @@ class OmniModalHandler(BaseHTTPRequestHandler):
                         tool_context, "access:denied", "endpoint", self.path, "denied",
                         {"failure_reason": str(exc), "path": self.path}
                     )
+                return
+
+        # Usage metering + plan gating (monthly query quota).
+        if claims:
+            try:
+                self._saas.record_usage(
+                    tenant_id=claims.tenant_id, user_id=claims.user_id, metric="queries"
+                )
+            except PlanLimitExceeded as exc:
+                self._write_json(402, {"error": str(exc), "metric": exc.metric,
+                                       "limit": exc.limit, "upgrade_required": True})
                 return
 
         try:
@@ -692,6 +1233,10 @@ class OmniModalHandler(BaseHTTPRequestHandler):
                 self._audit_sink.record_event(
                     tool_context, "query:complete", "endpoint", self.path, "ok",
                     {"query_hash": query_hash, "tenant_id": claims.tenant_id if claims else None}
+                )
+            if claims:
+                self._saas.analytics.capture(
+                    event="query", tenant_id=claims.tenant_id, user_id=claims.user_id
                 )
 
             response = result.response

@@ -25,13 +25,13 @@ Implement full-stack Sentry observability and intelligent recovery across the Om
   - Wire `scrub_pii` into the existing `before_send` hook so all outbound Sentry payloads are scrubbed
   - _Requirements: 2.3, 2.5, 12.2, 12.3_
 
-  - [ ]* 1.1 Write property test for PII scrubbing completeness
+  - [x]* 1.1 Write property test for PII scrubbing completeness
     - **Property 1: PII Scrubbing Completeness**
     - Generate strings with embedded emails, connection strings (e.g. `postgres://...`), and `password=secret` key-value pairs using `hypothesis`; assert `scrub_value()` output contains no original PII tokens and all non-PII text is preserved
     - Test file: `services/api/tests/test_pii_scrubbing.py`
     - **Validates: Requirements 2.5, 6.5**
 
-  - [ ]* 1.2 Write unit tests for Observability facade
+  - [x]* 1.2 Write unit tests for Observability facade
     - Sentry init with valid DSN (smoke — verify `_sentry` is set)
     - Sentry init with missing DSN (no error, `_sentry` stays `None`)
     - `continue_trace` with valid `sentry-trace` header produces a linked transaction
@@ -54,31 +54,31 @@ Implement full-stack Sentry observability and intelligent recovery across the Om
   - On exhaustion: `capture_exception` with `total_attempts` and `cumulative_elapsed_ms` in context
   - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5, 9.6, 9.7, 9.8_
 
-  - [ ]* 2.1 Write property test for exponential backoff with jitter bounds
+  - [x]* 2.1 Write property test for exponential backoff with jitter bounds
     - **Property 2: Exponential Backoff with Jitter Bounds**
     - Generate `(base_delay, attempt, jitter_factor)` tuples with `hypothesis`; assert `base_delay * 2^attempt ≤ actual_delay ≤ base_delay * 2^attempt * (1 + jitter_factor)`
     - Test file: `services/api/tests/test_retry.py`
     - **Validates: Requirements 9.1, 9.7**
 
-  - [ ]* 2.2 Write property test for retryable exception classification
+  - [x]* 2.2 Write property test for retryable exception classification
     - **Property 3: Retryable Exception Classification Correctness**
     - Generate exception instances from both retryable and non-retryable sets; assert `is_retryable()` returns the correct boolean for every generated exception
     - Test file: `services/api/tests/test_retry.py`
     - **Validates: Requirements 9.4, 9.5**
 
-  - [ ]* 2.3 Write property test for Retry-After header override
+  - [x]* 2.3 Write property test for Retry-After header override
     - **Property 4: Retry-After Header Override**
     - Generate numeric `Retry-After` values (within and exceeding `max_total_delay`); assert decorator uses the header value when it is within bounds and falls back to exponential backoff when it exceeds the ceiling
     - Test file: `services/api/tests/test_retry.py`
     - **Validates: Requirements 9.8**
 
-  - [ ]* 2.4 Write property test for retry breadcrumb count
+  - [x]* 2.4 Write property test for retry breadcrumb count
     - **Property 5: Retry Breadcrumb Count Matches Attempt Count**
     - Generate `max_retries` values N; simulate a function that always fails; assert exactly N breadcrumbs were recorded and the final exception context contains `attempts = N`
     - Test file: `services/api/tests/test_retry.py`
     - **Validates: Requirements 9.2, 9.3**
 
-  - [ ]* 2.5 Write property test for string truncation
+  - [x]* 2.5 Write property test for string truncation
     - **Property 6: String Truncation Preserves Prefix**
     - Generate strings of length 0–2000 with `hypothesis`; assert truncation at limits 256, 512, and 500 returns the input unchanged when `len ≤ limit`, and returns exactly the first K characters otherwise
     - Test file: `services/api/tests/test_retry.py` (or `test_observability.py`)
@@ -97,19 +97,19 @@ Implement full-stack Sentry observability and intelligent recovery across the Om
   - Export `FallbackController`, `FallbackWarning`, `OrchestrationResult` from `orchestration/__init__.py`
   - _Requirements: 10.1, 10.2, 10.3, 10.4, 10.6_
 
-  - [ ]* 3.1 Write property test for fallback warning aggregation
+  - [x]* 3.1 Write property test for fallback warning aggregation
     - **Property 11: Fallback Warning Aggregation**
     - Generate random subsets of `{"external_delegation", "retrieval", "transcription", "tool_call"}` as failing subsystems; assert `warnings` array contains exactly one entry per failed subsystem with the correct `source` identifier, and `skipped_tools` contains one entry per failed tool
     - Test file: `services/api/tests/test_fallbacks.py`
     - **Validates: Requirements 10.4, 10.6**
 
-  - [ ]* 3.2 Write property test for transcription failure message completeness
+  - [x]* 3.2 Write property test for transcription failure message completeness
     - **Property 12: Transcription Failure Message Completeness**
     - Generate `(stage, exception_type_name)` pairs; assert the resulting error message contains both the stage string and the exception type name string
     - Test file: `services/api/tests/test_fallbacks.py`
     - **Validates: Requirements 4.2, 10.2**
 
-  - [ ]* 3.3 Write unit tests for FallbackController
+  - [x]* 3.3 Write unit tests for FallbackController
     - External delegation fallback returns internal result only (no external findings) and populates `warnings` with `source="external_delegation"`
     - Retrieval failure returns `partial=True` and `failure_source="retrieval"` in response
     - Tool failure skips failed tool and includes `skipped_tools` entry with name and reason
@@ -131,13 +131,13 @@ Implement full-stack Sentry observability and intelligent recovery across the Om
   - Wrap extraction and embedding outbound calls with `@retry_with_backoff` using `is_retryable` as the `retryable` predicate
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 9.9_
 
-  - [ ]* 5.1 Write property test for ingestion observability context completeness
+  - [x]* 5.1 Write property test for ingestion observability context completeness
     - **Property 8: Ingestion Observability Context Completeness**
     - Generate random `(document_id, tenant_id, source_type, file_name, file_size)` tuples; simulate failures at each stage; assert the captured context includes all required fields, and that `chunk_index` is present when the failure stage is chunking
     - Test file: `services/api/tests/test_ingestion_observability.py`
     - **Validates: Requirements 3.1, 3.2, 3.3, 3.4**
 
-  - [ ]* 5.2 Write unit tests for ingestion observability
+  - [x]* 5.2 Write unit tests for ingestion observability
     - Breadcrumb recorded at info level for each of the four stages
     - Validation failure produces a warning-level breadcrumb with all required fields
     - Chunking failure captures exception with correct `chunk_index`
@@ -169,7 +169,7 @@ Implement full-stack Sentry observability and intelligent recovery across the Om
   - On exhausted retries: delegate to `FallbackController.handle_retrieval_failure`; return response with `partial=True`, `failure_source="retrieval"`, and original query echoed
   - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 9.9, 10.3_
 
-  - [ ]* 7.1 Write property test for retrieval failure classification
+  - [x]* 7.1 Write property test for retrieval failure classification
     - **Property 15: Retrieval Failure Classification**
     - Generate exceptions from connection-error and query-error categories; assert `failure_classification` is `"connection_error"` for connection/timeout types and `"query_error"` otherwise
     - Test file: `services/api/tests/test_ingestion_observability.py` (or new `test_retrieval_observability.py`)
@@ -201,7 +201,7 @@ Implement full-stack Sentry observability and intelligent recovery across the Om
   - On exhausted retries: `FallbackController.handle_delegation_failure`; return internal-only result with `warnings` field identifying `"external_delegation"` as unavailable
   - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 9.9, 10.1_
 
-  - [ ]* 9.1 Write property test for URL host extraction
+  - [x]* 9.1 Write property test for URL host extraction
     - **Property 7: URL Host Extraction**
     - Generate valid URLs with varied schemes, hosts, ports, paths, queries, and fragments using `hypothesis`; assert `extract_host()` returns only `host` (or `host:port` for non-default ports) with no scheme, path, or query
     - Test file: `services/api/tests/test_observability.py` (or `test_fallbacks.py`)
@@ -217,19 +217,19 @@ Implement full-stack Sentry observability and intelligent recovery across the Om
   - Wire `FallbackController` into the workflow so individual step failures activate the correct fallback path and aggregate warnings into `OrchestrationResult`
   - _Requirements: 7.1, 7.2, 7.3, 10.6_
 
-  - [ ]* 10.1 Write property test for orchestration step breadcrumb symmetry
+  - [x]* 10.1 Write property test for orchestration step breadcrumb symmetry
     - **Property 13: Orchestration Step Breadcrumb Symmetry**
     - Generate sequences of steps with randomized success/failure outcomes; assert each successful step produces exactly one `"start"` and one `"complete"` breadcrumb; each failed step produces a `"start"` breadcrumb and a `"failed"` breadcrumb (with `elapsed_ms` and reason), and no `"complete"` breadcrumb
     - Test file: `services/api/tests/test_orchestration_tracing.py`
     - **Validates: Requirements 7.2**
 
-  - [ ]* 10.2 Write property test for orchestration timeout context completeness
+  - [x]* 10.2 Write property test for orchestration timeout context completeness
     - **Property 14: Orchestration Timeout Context Completeness**
     - Generate lists of N completed steps (each with a name and duration) and one in-progress step; assert the captured timeout context includes all N completed steps with correct names/durations, the in-progress step name, `elapsed_ms`, and `timeout_limit_ms`
     - Test file: `services/api/tests/test_orchestration_tracing.py`
     - **Validates: Requirements 7.1, 7.3**
 
-  - [ ]* 10.3 Write unit tests for orchestration tracing
+  - [x]* 10.3 Write unit tests for orchestration tracing
     - Step breadcrumbs recorded in correct order for a multi-step workflow
     - Step timeout captures `AgentTimeoutContext` with correct fields
     - Overall timeout includes completed step list and in-progress step name
@@ -274,19 +274,19 @@ Implement full-stack Sentry observability and intelligent recovery across the Om
   - Update existing API calls in `apps/web/src/components/upload-dropzone.tsx`, `research-chat.tsx`, and any other components that call the backend to use `apiRequest`
   - _Requirements: 11.1, 11.2, 11.3, 11.4, 11.5, 12.1_
 
-  - [ ]* 14.1 Write property test for frontend outbound request headers
+  - [x]* 14.1 Write property test for frontend outbound request headers
     - **Property 9: Frontend Outbound Request Headers**
     - Using `fast-check`, generate arbitrary request paths; assert every call through `apiRequest` attaches a valid UUID v4 `X-Correlation-ID`, a `sentry-trace` header, and a `baggage` header
     - Test file: `apps/web/src/__tests__/api-client.test.ts`
     - **Validates: Requirements 11.4, 12.1**
 
-  - [ ]* 14.2 Write property test for frontend error capture context completeness
+  - [x]* 14.2 Write property test for frontend error capture context completeness
     - **Property 10: Frontend Error Capture Context Completeness**
     - Using `fast-check`, generate file metadata `(file_name, file_size)` and HTTP status codes (including the sentinel `"network_error"`); assert the Sentry capture context includes all applicable fields for the upload and research query cases
     - Test file: `apps/web/src/__tests__/error-capture.test.ts`
     - **Validates: Requirements 11.1, 11.2**
 
-  - [ ]* 14.3 Write unit tests for the frontend API client
+  - [x]* 14.3 Write unit tests for the frontend API client
     - Upload failure (non-2xx) captures Sentry event with file_name, file_size, http_status
     - Research query failure (non-2xx) captures with query_length and http_status
     - Network error captures with `"network_error"` status
@@ -297,14 +297,14 @@ Implement full-stack Sentry observability and intelligent recovery across the Om
 
 - [x] 15. Implement and test the Sentry initialization and error boundary in the frontend
 
-  - [ ]* 15.1 Write unit tests for Sentry initialization
+  - [x]* 15.1 Write unit tests for Sentry initialization
     - Sentry init with valid DSN — `Sentry.init` called with correct params
     - Sentry init with missing `NEXT_PUBLIC_SENTRY_DSN` — `Sentry.init` not called, no error thrown
     - Sentry init with malformed DSN — `console.warn` called with expected message, `Sentry.init` not called
     - Test file: `apps/web/src/__tests__/sentry-init.test.ts`
     - _Requirements: 1.1, 1.7, 1.9_
 
-  - [ ]* 15.2 Write unit tests for error boundary component
+  - [x]* 15.2 Write unit tests for error boundary component
     - Error boundary renders `children` when no error occurs
     - When a child component throws, boundary renders fallback UI
     - Fallback UI includes error message, "Try Again" button, and "Go Home" link
@@ -320,13 +320,13 @@ Implement full-stack Sentry observability and intelligent recovery across the Om
   - If Sentry SDK is unavailable, all span/trace calls are no-ops
   - _Requirements: 12.2, 12.3, 12.4, 12.5, 12.6_
 
-  - [ ]* 16.1 Write property test for backend trace continuation
+  - [x]* 16.1 Write property test for backend trace continuation
     - **Property 16: Backend Trace Continuation**
     - Generate valid `sentry-trace` header values (format `{trace_id}-{span_id}-{sampled}`); assert the backend transaction's `trace_id` matches the incoming header's `trace_id`, establishing parent-child linkage
     - Test file: `services/api/tests/test_observability.py`
     - **Validates: Requirements 12.2**
 
-  - [ ]* 16.2 Write unit tests for distributed tracing in the HTTP handler
+  - [x]* 16.2 Write unit tests for distributed tracing in the HTTP handler
     - Valid `sentry-trace` header → transaction linked to frontend span (trace_id matches)
     - Missing `sentry-trace` header → new root transaction started, no error raised
     - Malformed `sentry-trace` header → new root transaction started, no error raised

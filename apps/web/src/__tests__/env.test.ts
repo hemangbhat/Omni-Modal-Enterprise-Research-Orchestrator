@@ -11,6 +11,7 @@ describe("getClientApiConfig", () => {
   beforeEach(() => {
     // Reset process.env before each test
     process.env = { ...originalEnv };
+    if (typeof window !== "undefined") window.localStorage.clear();
   });
 
   afterEach(() => {
@@ -45,6 +46,15 @@ describe("getClientApiConfig", () => {
     const { getClientApiConfig } = await import("@/lib/env");
     const config = getClientApiConfig();
     expect(config.token).toBe("test-bearer-token");
+  });
+
+  it("prefers the stored session token over NEXT_PUBLIC_API_TOKEN", async () => {
+    process.env.NEXT_PUBLIC_API_TOKEN = "env-token";
+    window.localStorage.setItem("omni_token", "session-token");
+    const { getClientApiConfig } = await import("@/lib/env");
+    const config = getClientApiConfig();
+    expect(config.token).toBe("session-token");
+    window.localStorage.clear();
   });
 });
 

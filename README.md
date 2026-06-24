@@ -89,20 +89,28 @@ DeterministicAgentGraph
 
 This path uses the in-memory vector store (no Postgres) and the hashing embedder (no API key). Everything runs locally.
 
+> **Configuration**: When started with `python -m omni_modal.main`, the backend
+> automatically loads a `.env` file from the repository root (or any parent of
+> the working directory). Real process environment variables always take
+> precedence over `.env`, so you can still override any value with
+> `$env:FOO=...` (PowerShell) or `export FOO=...` (bash). Copy `.env.example`
+> to `.env` and fill in the values you want, or set them inline as shown below.
+
 ```bash
 # 1. Install backend dependencies
 cd services/api
 pip install -e .
 cd ../..
 
-# 2. Generate a JWT signing secret (any random string works for local dev)
+# 2. Configure your environment. Either copy the template:
+#       cp .env.example .env        # then edit JWT_SECRET etc.
+#    or set the one required value inline (PowerShell shown; bash: export JWT_SECRET=...):
 $env:JWT_SECRET = "$(python -c "import secrets; print(secrets.token_hex(32))")"
 
-# 3. Start the backend
-$env:JWT_SECRET = "your-secret-here"   # PowerShell — or: export JWT_SECRET=... on bash
+# 3. Start the backend (auto-loads .env from the repo root)
 python -m omni_modal.main              # http://localhost:8000
 
-# 4. Issue a dev bearer token (same JWT_SECRET as above)
+# 4. Issue a dev bearer token (reads the same JWT_SECRET from .env or your env)
 python scripts/issue_jwt.py --tenant demo-tenant --user u1 --roles researcher
 
 # 5. Create apps/web/.env.local with these two lines:
@@ -122,12 +130,16 @@ persist → retrieve → stream is wired end-to-end using the offline hashing em
 **To add real semantic embeddings without OpenAI (free, local):**
 ```bash
 pip install sentence-transformers
+# Add to .env:  EMBEDDING_BACKEND=sentence-transformers  EMBEDDING_DIMENSIONS=384
+# (or set inline for one run:)
 $env:EMBEDDING_BACKEND = "sentence-transformers"
 python -m omni_modal.main
 ```
 
 **To add real semantic embeddings via OpenAI ($0.02/1M tokens):**
 ```bash
+# Add to .env:  EMBEDDING_BACKEND=openai  OPENAI_API_KEY=sk-...
+# (or set inline for one run:)
 $env:EMBEDDING_BACKEND = "openai"
 $env:OPENAI_API_KEY = "sk-..."
 python -m omni_modal.main
@@ -137,6 +149,9 @@ python -m omni_modal.main
 ```bash
 python -m omni_modal.benchmark.embedding_compare
 ```
+
+
+
 
 **To run a quick end-to-end retrieval test without starting the server:**
 ```bash
@@ -164,8 +179,13 @@ npm run typecheck:web
 
 ```bash
 cd services/api
-pip install -e ".[db,observability,performance]"
-python -m omni_modal.main   # HTTP server at http://localhost:8000
+pip install -e ".[db,observability,performance,api,saas]"
+
+# FastAPI (recommended): async, OpenAPI docs at http://localhost:8000/docs
+python -m omni_modal.api          # or: uvicorn omni_modal.api:app --port 8000
+
+# Stdlib reference server (zero web-framework deps), same behaviour:
+python -m omni_modal.main         # HTTP server at http://localhost:8000
 ```
 
 ### Tests
@@ -297,6 +317,70 @@ configured to produce them.
 
 ---
 
+## SaaS Layer
+
+OMERO ships a multi-tenant SaaS layer on top of the research engine. Everything
+here runs **fully offline with zero paid services** — orgs, workspaces, usage
+metering, plans, team invites, notifications, and an admin dashboard are all
+backed by in-memory stores and local adapters. Optional external services
+(S3, Resend, PostHog, Stripe) are real but strictly opt-in behind credentials,
+and the system falls back to the local adapter (with a log line) if a
+credential or library is missing.
+
+### Implemented and working offline ✅
+
+| Capability | Endpoint(s) | UI |
+|---|---|---|
+| Organizations + workspaces (auto-provisioned per tenant) | `GET/POST /workspaces` | Workspace switcher (top bar) |
+| Usage metering (monthly, per-tenant) + plan-limit gating | `GET /usage` | `/usage` dashboard |
+| Plans + billing (demo mode) with real limit enforcement | `GET /billing`, `POST /billing/change-plan` | `/billing` |
+| Team members + invites (redeemable via shareable link) | `GET /members`, `POST /invites`, `GET /invites/preview`, `POST /invites/accept` | `/team`, `/accept-invite` |
+| In-app notifications (unread badge, mark-all-read) | `GET /notifications`, `POST /notifications/read` | Top-bar notification center |
+| Admin dashboard (org stats, adapters, event counts, audit count) | `GET /admin/stats` (admin role) | `/admin` |
+
+Plan limits are enforced for real: `/query` and `/ingest/upload` record usage
+and return **HTTP 402** with an upgrade hint when the monthly quota is hit. The
+free plan caps queries/uploads/workspaces/members; pro and enterprise raise or
+remove the caps. The demo tenant is seeded on the `pro` plan so the demo never
+hits a wall.
+
+### Optional / opt-in (local fallback by default) ⚙️
+
+| Feature | Default (free) | Enable with | Honest status |
+|---|---|---|---|
+| File storage | local filesystem | `S3_BUCKET` (+`boto3`) | S3 adapter implemented (put/get/delete/presigned); used for object storage when set |
+| Invite/onboarding email | console log | `RESEND_API_KEY` | Resend adapter via stdlib `urllib`; sends real email when set |
+| Product analytics | in-memory counters | `POSTHOG_API_KEY` | PostHog capture via stdlib `urllib` when set |
+| Billing charges | demo (instant, no charge) | `STRIPE_SECRET_KEY` | Real Stripe Checkout + Customer Portal + signature-verified webhooks. `/billing` reports `stripe` mode and creates real (test-mode) subscriptions; products/prices are auto-provisioned. Falls back to demo (instant local plan change) when unset. |
+
+### Honest gaps in the SaaS layer
+
+- **Real payment flow (test mode).** With `STRIPE_SECRET_KEY` set, `/billing`
+  runs a real Stripe Checkout, Customer Portal, and webhook sync
+  (`checkout.session.completed`, `customer.subscription.updated|deleted`).
+  Test-mode keys mean no live charges. Without the key, demo billing applies
+  plan changes locally.
+- **SaaS state persists to Postgres when `DATABASE_URL` is set.** Organizations,
+  workspaces, members, invites, usage counters, and the document→workspace
+  mapping are stored in Postgres (migration `0003_saas.sql`) and survive
+  restart. With no `DATABASE_URL` the same interfaces fall back to in-memory
+  stores (offline/demo path; state resets on restart in that mode only).
+  Notifications and the audit sink are still in-process (not yet moved to
+  Postgres).
+- **Invites are redeemable end-to-end.** Creating an invite returns a token +
+  shareable `accept_url` (also shown with a copy button on `/team`). The
+  `/accept-invite` page previews the invite (`GET /invites/preview`) and accepts
+  it (`POST /invites/accept`), adding the user as an org member. Email delivery
+  still depends on the email adapter (console in local mode; Resend when
+  configured).
+- **Workspace scoping is enforced server-side.** The switcher persists the
+  active workspace and sends `workspace_id` on upload and on the documents /
+  projects / archives list endpoints, which filter by it. Documents are tagged
+  to their workspace at ingest time. (Tenant isolation via `tenant_id` still
+  applies as the outer boundary.)
+
+---
+
 ## Troubleshooting
 
 **API calls fail in the browser with CORS errors**
@@ -347,8 +431,9 @@ Or connect the GitHub repo to Vercel for automatic deploys on push.
 
 ## Key Design Decisions
 
-**Why `BaseHTTPRequestHandler` instead of FastAPI/Flask?**
-The backend deliberately avoids web frameworks to demonstrate understanding of HTTP at the stdlib level — socket handling, header parsing, streaming SSE responses. It's more educational and shows low-level knowledge.
+**Backend HTTP layer — FastAPI (primary) with a stdlib fallback**
+
+The backend runs on **FastAPI** (`omni_modal.api`, run with `python -m omni_modal.api` or `uvicorn omni_modal.api:app`): async handlers, Pydantic request validation, a JWT auth dependency, RBAC, usage metering/plan gating, and auto-generated OpenAPI docs at `/docs` (28 routes). It covers the full surface — auth (register/login), query + SSE streaming, ingestion (upload/local/job-status), documents/projects/archives/entities, and the entire SaaS layer (workspaces, usage, billing incl. Stripe checkout/portal/webhook, members/invites, plans, admin, notifications) — and is covered by `TestClient` tests in `tests/test_fastapi_app.py`. The original stdlib `http.server` implementation (`omni_modal.main`) remains as a dependency-free reference that shares all the same domain services, so behaviour is identical across both.
 
 **Why Hypothesis property-based testing?**
 Unit tests catch known cases; property tests find unknown edge cases. The 34+ PBT tests cover correctness invariants: JWT round-trips, PII scrubbing completeness, rate limiter window boundaries, batch partitioning, cache eviction, etc.
@@ -391,12 +476,12 @@ Internal document chunks must never leave the tenant security boundary. The `Red
 
 - **Whisper transcription** — `LocalWhisperTranscriber` is wired. Set `WHISPER_MODEL_PATH=base` (or any model size) to activate. Requires Whisper CLI on PATH (`pip install openai-whisper`).
 - **Entity extraction** — `EntityExtractionService` runs automatically post-ingestion. Rule-based by default; set `QLORA_ENTITY_MODEL_PATH=dslim/bert-base-NER` for real HF NER (free, ~420 MB). Entities are exposed via `GET /entities/:document_id`.
-- **Semantic embeddings are now pluggable** — `EMBEDDING_BACKEND` selects `hashing` (default offline fallback), `openai` (real, production-ready, 1536-dim, works with in-memory + pgvector), or `sentence-transformers` (real local, experimental, 384-dim, in-memory). The default remains the deterministic hashing fallback so the offline demo needs no keys; real backends are opt-in. Live semantic quality has not been benchmarked on this machine — see the embedding benchmark to produce real numbers.
-- **pgvector ingestion persistence** — `BatchEmbedder` (correct `ON CONFLICT DO UPDATE` upsert, single transaction, proper pgvector literal) is built and unit-tested but is **not yet wired into the Postgres ingestion path** (document-row creation is out of scope). Only the in-memory path persists end-to-end today. The pgvector retriever reads whatever has been seeded into the DB.
-- **Measured benchmark numbers** — the HNSW config in `0002_perf.sql` has not been benchmarked against a real corpus. Run `python -m omni_modal.benchmark` against a populated DB to produce real recall/latency figures before citing any.
-- **QLoRA entity extraction** — Interface and training scaffolding exist; no model weights are included.
+- **Semantic embeddings are pluggable** — `EMBEDDING_BACKEND` selects `hashing` (deterministic offline fallback, 1536-dim), `openai` (real, 1536-dim), or `sentence-transformers` (real local, default model `BAAI/bge-small-en-v1.5`, 384-dim, with automatic bge/e5 query prefixing). The offline demo defaults to hashing so it needs no keys.
+- **pgvector ingestion persistence — wired end-to-end.** When `DATABASE_URL` is set, ingestion persists `documents → document_chunks → embeddings(vector)` via `PostgresChunkPersistence`, and the `PgVectorChunkRetriever` performs real cosine/HNSW semantic search over that content. Verified on Neon (a relevant chunk ranks top). The `embeddings` column is `vector(384)` after migration `0004_embeddings_384.sql` to match the local model; use a 1536-dim model + the original column if you prefer OpenAI. The in-memory path remains the offline fallback when `DATABASE_URL` is unset.
+- **Measured retrieval quality** — on a 16-query internal paraphrase eval set (`python -m omni_modal.benchmark.retrieval_eval` against a populated Neon DB), the `BAAI/bge-small-en-v1.5` (384-dim) + pgvector/HNSW path scores **recall@1 = 0.875, recall@5 = 0.938, MRR = 0.906**, versus the deterministic hashing baseline's recall@1 = 0.40. This is a small internal set (not a public benchmark like BEIR/MTEB), so treat it as an indicative sanity check, not a leaderboard score. Re-run the eval to reproduce.
+- **QLoRA entity extraction** — there is **no trained QLoRA model**. `ENTITY_NER_MODEL_PATH` (legacy alias `QLORA_ENTITY_MODEL_PATH`) loads a *pretrained* HF NER model (`dslim/bert-base-NER`); a QLoRA training pipeline is scaffolded but produces no fine-tuned weights. Rule-based extraction is the default.
 - **Live A2A / Gemini delegation** — `HttpA2AResearchClient` implements the JSON-RPC protocol correctly but requires a real endpoint URL. `DisabledExternalResearchClient` is used by default.
-- **Persistent audit log** — `InMemoryAuditSink` is in-process. A PostgreSQL-backed sink would implement the same `EnhancedAuditSink` protocol.
+- **Persistent audit log** — `PostgresAuditSink` writes all security/observability events to the `audit_events` table (migration `0007`, bigserial id, jsonb metadata). Wired into both the stdlib server and the FastAPI app via `select_audit_sink()`. Verified on Neon: tool calls, auth events, and system events persist and survive restart. The original Drizzle `audit_logs` table (compliance enum path) is kept for structured compliance exports.
 - **Frontend authentication UI** — `middleware.ts` is a pass-through; there is a `/sign-in` page that explains how to generate a dev token. JWT is enforced at the backend API level.
 - **Real session management** — JWT is enforced at the backend (HS256, constant-time, expiry checked). The frontend sends the `NEXT_PUBLIC_API_TOKEN` bearer token on every API call. Production would use cookie-based sessions (NextAuth etc.).
 - **Live database for most tests** — DB-dependent tests use mocks. Integration tests against a real pgvector instance require `DATABASE_URL` to be set.

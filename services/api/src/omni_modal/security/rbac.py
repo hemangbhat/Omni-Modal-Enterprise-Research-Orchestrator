@@ -8,6 +8,13 @@ ENDPOINT_ROLES: dict[str, frozenset[str]] = {
     "/documents":      frozenset({"researcher", "admin", "auditor"}),
     "/projects":       frozenset({"researcher", "admin", "auditor"}),
     "/archives":       frozenset({"researcher", "admin", "auditor"}),
+    # SaaS endpoints
+    "/workspaces":           frozenset({"researcher", "admin"}),
+    "/invites":              frozenset({"admin"}),
+    "/billing/change-plan":  frozenset({"admin"}),
+    "/billing/checkout":     frozenset({"admin"}),
+    "/billing/confirm":      frozenset({"admin"}),
+    "/billing/portal":       frozenset({"admin"}),
     # /entities/:id is a prefix route — checked by prefix match in assert_endpoint_roles
 }
 

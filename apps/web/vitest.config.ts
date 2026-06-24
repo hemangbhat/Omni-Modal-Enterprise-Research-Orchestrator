@@ -14,7 +14,9 @@ export default defineConfig({
     // excluded here so Vitest doesn't fail on "No test suite found".
     include: [
       "src/__tests__/env.test.ts",
+      "src/__tests__/auth.test.ts",
       "src/__tests__/api-client-real.test.ts",
+      "src/__tests__/saas-api.test.ts",
     ],
   },
   resolve: {

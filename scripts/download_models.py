@@ -32,9 +32,13 @@ def download_sentence_transformers() -> None:
 
 
 def download_ner_model() -> None:
-    model_name = os.environ.get("QLORA_ENTITY_MODEL_PATH", "dslim/bert-base-NER")
+    model_name = (
+        os.environ.get("ENTITY_NER_MODEL_PATH")
+        or os.environ.get("QLORA_ENTITY_MODEL_PATH")
+        or "dslim/bert-base-NER"
+    )
     if not model_name:
-        print("  ⚠ QLORA_ENTITY_MODEL_PATH not set — skipping NER download")
+        print("  ⚠ ENTITY_NER_MODEL_PATH not set — skipping NER download")
         return
     try:
         from transformers import pipeline

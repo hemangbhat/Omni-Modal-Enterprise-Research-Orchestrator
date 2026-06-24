@@ -1,3 +1,5 @@
+import { getStoredToken } from "@/lib/auth";
+
 type ServerEnv = {
   appName: string;
   backendBaseUrl: string;
@@ -22,17 +24,18 @@ type ClientApiConfig = {
 };
 
 /**
- * Client-side API configuration, read from NEXT_PUBLIC_* env vars so it is
- * available in the browser.
+ * Client-side API configuration.
  *
  * - NEXT_PUBLIC_BACKEND_URL: backend origin (default http://localhost:8000)
- * - NEXT_PUBLIC_API_TOKEN: optional bearer token for local demos. In a real
- *   deployment the token would come from an authenticated session, not an env
- *   var — this is a development convenience only.
+ * - token: the active session token. Read first from the signed-in session
+ *   (localStorage, set on sign-in), falling back to the build-time
+ *   NEXT_PUBLIC_API_TOKEN when present. This lets sign-in / sign-out actually
+ *   control which credential is sent to the backend.
  */
 export function getClientApiConfig(): ClientApiConfig {
+  const sessionToken = getStoredToken();
   return {
     baseUrl: process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000",
-    token: process.env.NEXT_PUBLIC_API_TOKEN ?? null
+    token: sessionToken ?? process.env.NEXT_PUBLIC_API_TOKEN ?? null
   };
 }

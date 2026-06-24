@@ -6,6 +6,7 @@ import { MaterialIcon } from "@/components/material-icon";
 import { TopBar } from "@/components/top-bar";
 import { apiRequest } from "@/lib/api-client";
 import { getClientApiConfig } from "@/lib/env";
+import { withWorkspaceQuery } from "@/lib/workspace";
 
 type ProjectStatus = "Active" | "Completed";
 
@@ -47,7 +48,7 @@ export default function ProjectsPage() {
 
   useEffect(() => {
     setLoading(true);
-    apiRequest("/projects", { method: "GET", headers }, { baseUrl })
+    apiRequest(withWorkspaceQuery("/projects"), { method: "GET", headers }, { baseUrl })
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();

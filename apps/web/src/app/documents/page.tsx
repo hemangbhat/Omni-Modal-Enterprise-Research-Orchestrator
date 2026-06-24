@@ -5,6 +5,7 @@ import Link from "next/link";
 import { MaterialIcon } from "@/components/material-icon";
 import { apiRequest } from "@/lib/api-client";
 import { getClientApiConfig } from "@/lib/env";
+import { withWorkspaceQuery } from "@/lib/workspace";
 
 type DocStatus = "ready" | "processing" | "uploaded" | "failed";
 
@@ -79,13 +80,20 @@ export default function DocumentsPage() {
   const [search, setSearch] = useState("");
   const [inspectorOpen, setInspectorOpen] = useState(false);
 
+  // Seed the filter from a ?q= query param (set by the top-bar search).
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const q = new URLSearchParams(window.location.search).get("q");
+    if (q) setSearch(q);
+  }, []);
+
   const { baseUrl, token } = getClientApiConfig();
   const headers: Record<string, string> = {};
   if (token) headers.Authorization = `Bearer ${token}`;
 
   useEffect(() => {
     setLoading(true);
-    apiRequest("/documents", { method: "GET", headers }, { baseUrl })
+    apiRequest(withWorkspaceQuery("/documents"), { method: "GET", headers }, { baseUrl })
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();

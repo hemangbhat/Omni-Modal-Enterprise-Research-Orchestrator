@@ -121,6 +121,7 @@ class _State:
     queue: Any = None
     entity_service: Any = None
     vector_store: Any = None
+    audit_sink: Any = None
 
 
 state = _State()
@@ -164,6 +165,9 @@ def _build_runtime() -> None:
     )
     state.saas = get_saas_service()
     state.accounts = get_account_service()
+    from omni_modal.security.pg_audit_sink import select_audit_sink  # noqa: PLC0415
+
+    state.audit_sink = select_audit_sink()
 
 
 @asynccontextmanager
@@ -340,6 +344,7 @@ def create_app() -> FastAPI:
                 "analytics": state.saas.analytics.backend,
             },
             "billing_mode": state.saas.billing_mode(),
+            "audit_events": len(state.audit_sink.entries) if state.audit_sink else 0,
         }
 
     @app.get("/invites/preview", tags=["saas"])

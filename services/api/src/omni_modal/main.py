@@ -57,6 +57,7 @@ from omni_modal.security.auth import verify_jwt, jwt_secret_from_env, AuthError,
 from omni_modal.security.accounts import AccountError, get_account_service
 from omni_modal.security.rbac import assert_endpoint_roles, RbacError
 from omni_modal.security.audit import InMemoryAuditSink
+from omni_modal.security.pg_audit_sink import select_audit_sink
 from omni_modal.security.rate_limiting import SlidingWindowRateLimiter, RateLimitExceeded
 from omni_modal.security.input_validation import (
     ValidationError, assert_body_size, assert_query_length, assert_tenant_id, assert_document_id_uuid,
@@ -149,7 +150,7 @@ class OmniModalHandler(BaseHTTPRequestHandler):
         external_client_from_environment(),
         select_answer_synthesizer(),
     )
-    _audit_sink = InMemoryAuditSink()
+    _audit_sink = select_audit_sink()
     _rate_limiter = SlidingWindowRateLimiter()
     _account_service = get_account_service()
 

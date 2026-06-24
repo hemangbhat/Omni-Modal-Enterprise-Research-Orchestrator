@@ -4,6 +4,7 @@ import { useRef, useState } from "react";
 import { MaterialIcon } from "@/components/material-icon";
 import { apiRequest, captureUploadError } from "@/lib/api-client";
 import { getClientApiConfig } from "@/lib/env";
+import { getActiveWorkspaceId } from "@/lib/workspace";
 import type { DocumentStatus } from "@/lib/mock-data";
 
 type UploadItem = {
@@ -99,6 +100,7 @@ export function UploadDropzone() {
     if (token) headers.Authorization = `Bearer ${token}`;
     try {
       const contentBase64 = await fileToBase64(file);
+      const workspaceId = getActiveWorkspaceId();
       const res = await apiRequest(
         "/ingest/upload",
         {
@@ -107,7 +109,8 @@ export function UploadDropzone() {
           body: JSON.stringify({
             filename: file.name,
             content_base64: contentBase64,
-            source_kind: sourceKindFor(file.type)
+            source_kind: sourceKindFor(file.type),
+            ...(workspaceId ? { workspace_id: workspaceId } : {})
           })
         },
         { baseUrl, timeout: 60_000 }

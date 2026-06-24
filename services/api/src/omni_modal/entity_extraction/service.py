@@ -1,8 +1,12 @@
 """Entity extraction service — wired into the ingestion pipeline.
 
-Selected by ``QLORA_ENTITY_MODEL_PATH`` env var:
+Selected by ``ENTITY_NER_MODEL_PATH`` (preferred) or the legacy
+``QLORA_ENTITY_MODEL_PATH`` env var (kept for backward compatibility):
   - Unset or empty   → RuleBasedEnterpriseEntityExtractor (zero deps, always works)
-  - A HF model ID or local path (e.g. "dslim/bert-base-NER") → QLoRAEnterpriseEntityExtractor
+  - A HF model ID or local path (e.g. "dslim/bert-base-NER") → a pretrained
+    Hugging Face token-classification (NER) model. NOTE: this loads a
+    *pretrained* model; it is NOT a QLoRA fine-tune. A QLoRA training pipeline
+    is scaffolded separately but no fine-tuned weights are produced.
     (requires: pip install transformers torch)
 
 The service is safe to call on any chunk; it never raises (logs failures
@@ -30,9 +34,21 @@ from omni_modal.ingestion.models import IngestionResult
 from omni_modal.observability import observability
 
 
+def _resolve_ner_model_path() -> str:
+    """Return the configured NER model path.
+
+    Prefers the honest ``ENTITY_NER_MODEL_PATH`` and falls back to the legacy
+    ``QLORA_ENTITY_MODEL_PATH`` so existing .env files keep working.
+    """
+    new = os.environ.get("ENTITY_NER_MODEL_PATH", "").strip()
+    if new:
+        return new
+    return os.environ.get("QLORA_ENTITY_MODEL_PATH", "").strip()
+
+
 def build_entity_extractor() -> EnterpriseEntityExtractor:
     """Construct the best available extractor from environment config."""
-    model_path_raw = os.environ.get("QLORA_ENTITY_MODEL_PATH", "").strip()
+    model_path_raw = _resolve_ner_model_path()
     if not model_path_raw:
         return RuleBasedEnterpriseEntityExtractor()
     try:

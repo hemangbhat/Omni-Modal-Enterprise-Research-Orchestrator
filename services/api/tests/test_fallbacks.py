@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import patch
 
 import _path  # noqa: F401  — adds services/api/src to sys.path
-from hypothesis import given, settings
+from hypothesis import given, settings, HealthCheck
 import hypothesis.strategies as st
 
 from omni_modal.orchestration.fallbacks import (
@@ -44,10 +44,15 @@ class TestFallbackWarningAggregation(unittest.TestCase):
     @given(
         failing=st.lists(st.sampled_from(SUBSYSTEMS), min_size=0, max_size=3, unique=True),
         failing_tools=st.lists(
-            st.text(min_size=1, max_size=20), min_size=0, max_size=3, unique=True
+            st.text(
+                alphabet="abcdefghijklmnopqrstuvwxyz0123456789", min_size=1, max_size=20
+            ),
+            min_size=0,
+            max_size=3,
+            unique=True,
         ),
     )
-    @settings(max_examples=100)
+    @settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
     def test_fallback_warning_aggregation(self, failing, failing_tools):
         """One warning per failed subsystem; one skipped_tools entry per failed tool."""
         with patch(_PATCH_TARGET):

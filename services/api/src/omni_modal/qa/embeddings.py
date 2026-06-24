@@ -182,6 +182,11 @@ class SentenceTransformerEmbeddingProvider:
 
     The ``sentence-transformers`` package is an OPTIONAL dependency. If it is
     not installed, constructing this provider raises ``EmbeddingError``.
+
+    Asymmetric retrieval instructions: some strong small models (BGE, E5)
+    expect an instruction prefix on the *query* side only. This provider
+    applies the correct prefix automatically based on the model name so
+    retrieval quality is not silently degraded.
     """
 
     def __init__(self, *, model_name: str = "sentence-transformers/all-MiniLM-L6-v2") -> None:
@@ -195,20 +200,42 @@ class SentenceTransformerEmbeddingProvider:
         self._model_name = model_name
         self._model = SentenceTransformer(model_name)
         self._dimensions = int(self._model.get_sentence_embedding_dimension())
+        self._query_prefix, self._doc_prefix = self._prefixes_for(model_name)
+
+    @staticmethod
+    def _prefixes_for(model_name: str) -> tuple[str, str]:
+        """Return (query_prefix, doc_prefix) for the model family.
+
+        - BGE v1.5 English: query instruction, no passage prefix.
+        - E5 family: ``query:`` / ``passage:`` prefixes.
+        - Everything else (e.g. MiniLM): no prefixes (symmetric).
+        """
+        name = model_name.lower()
+        if "bge" in name and "en" in name:
+            return ("Represent this sentence for searching relevant passages: ", "")
+        if name.startswith("intfloat/e5") or "/e5-" in name or name.startswith("e5-"):
+            return ("query: ", "passage: ")
+        return ("", "")
 
     @property
     def dimensions(self) -> int:
         return self._dimensions
 
     def embed_query(self, text: str) -> list[float]:
-        return self.embed_document(text)
+        vector = self._model.encode(
+            [self._query_prefix + text], normalize_embeddings=True
+        )[0]
+        return [float(v) for v in vector]
 
     def embed_document(self, text: str) -> list[float]:
-        vector = self._model.encode([text], normalize_embeddings=True)[0]
+        vector = self._model.encode(
+            [self._doc_prefix + text], normalize_embeddings=True
+        )[0]
         return [float(v) for v in vector]
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        vectors = self._model.encode(list(texts), normalize_embeddings=True)
+        prefixed = [self._doc_prefix + t for t in texts]
+        vectors = self._model.encode(prefixed, normalize_embeddings=True)
         return [[float(v) for v in row] for row in vectors]

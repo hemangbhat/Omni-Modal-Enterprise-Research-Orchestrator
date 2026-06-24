@@ -15,6 +15,10 @@ from omni_modal.qa.models import QueryRequest, QueryResponse, RetrievedChunk, So
 from omni_modal.qa.retrieval import ChunkRetriever, PgVectorChunkRetriever
 from omni_modal.qa.service import InternalQuestionAnsweringService
 from omni_modal.qa.synthesis import ExtractiveAnswerSynthesizer, stream_markdown
+from omni_modal.qa.gemini_synthesis import (
+    GeminiAnswerSynthesizer,
+    select_answer_synthesizer,
+)
 
 __all__ = [
     "ChunkRetriever",
@@ -22,6 +26,7 @@ __all__ = [
     "EmbeddingProvider",
     "EmbeddingSelection",
     "ExtractiveAnswerSynthesizer",
+    "GeminiAnswerSynthesizer",
     "HashingQueryEmbeddingProvider",
     "InternalQuestionAnsweringService",
     "OpenAIEmbeddingProvider",
@@ -33,6 +38,7 @@ __all__ = [
     "RetrievedChunk",
     "SentenceTransformerEmbeddingProvider",
     "SourceReference",
+    "select_answer_synthesizer",
     "select_embedding_provider",
     "stream_markdown",
 ]

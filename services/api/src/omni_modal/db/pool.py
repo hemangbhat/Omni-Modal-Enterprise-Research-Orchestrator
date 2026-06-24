@@ -43,8 +43,19 @@ def get_connection_pool():
             max_size=max_size,
             timeout=5.0,
             reconnect_failed=_on_reconnect_failed,
-            open=False,  # Don't open immediately; let caller decide
+            open=False,  # Construct closed to avoid the constructor-open
+                         # deprecation; opened explicitly just below.
         )
+        # psycopg_pool 3.2+ no longer auto-opens the pool, and consumers use
+        # `with pool.connection()` which raises "pool is not open yet" until
+        # `open()` is called. Open here (non-blocking) so the singleton is
+        # immediately usable by retrieval and MCP callers. Connections are
+        # established lazily in the background; `connection()` waits up to
+        # `timeout` for one.
+        try:
+            _pool.open()
+        except Exception as exc:  # pragma: no cover - defensive
+            observability.capture_exception(exc, operation="db.pool.open")
     return _pool
 
 

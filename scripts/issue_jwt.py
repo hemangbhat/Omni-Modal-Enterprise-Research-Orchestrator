@@ -22,7 +22,12 @@ _API_SRC = os.path.join(
 )
 sys.path.insert(0, os.path.abspath(_API_SRC))
 
+from omni_modal.env_loader import load_dotenv  # noqa: E402
 from omni_modal.security.auth import _make_jwt  # noqa: E402
+
+# Load .env so JWT_SECRET (and friends) need not be exported manually. The
+# signing secret must match the backend's; both now read the same .env.
+load_dotenv()
 
 
 def main() -> int:

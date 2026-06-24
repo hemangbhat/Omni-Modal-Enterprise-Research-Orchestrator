@@ -149,6 +149,7 @@ class InternalResearchAdkWorkflow:
         self,
         retriever: ChunkRetriever,
         external_client: ExternalResearchClient | None = None,
+        synthesizer=None,
     ) -> None:
         client = external_client or DisabledExternalResearchClient()
         self._graph = DeterministicAgentGraph(
@@ -158,7 +159,7 @@ class InternalResearchAdkWorkflow:
                 MissingDataDetectionNode(),
                 ExternalDelegationNode(client),
                 ExternalEvidenceMergeNode(),
-                ReasoningSynthesisNode(),
+                ReasoningSynthesisNode(synthesizer),
                 ControlledFallbackNode(),
             ]
         )

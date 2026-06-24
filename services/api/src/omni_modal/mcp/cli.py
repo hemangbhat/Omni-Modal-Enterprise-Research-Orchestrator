@@ -3,10 +3,15 @@ from __future__ import annotations
 import os
 import sys
 
+from omni_modal.env_loader import load_dotenv
 from omni_modal.mcp.repositories import InMemoryMcpRepository, PostgresMcpRepository
 from omni_modal.mcp.server import McpServer
 from omni_modal.mcp.tools import McpToolRouter
 from omni_modal.security.document_access import DocumentAccessGuard
+
+# Honour the repository .env so DATABASE_URL is picked up when the MCP server
+# is launched directly (e.g. by an MCP client) without a pre-exported env.
+load_dotenv()
 
 
 def build_router() -> McpToolRouter:

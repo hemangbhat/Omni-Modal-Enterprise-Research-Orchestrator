@@ -19,21 +19,21 @@ tests (Hypothesis) are added as sub-tasks close to each implementation step.
     specified in design section 2.1
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5_
 
-  - [ ]* 1.1 Write property test for JWT round-trip fidelity (Property 1)
+  - [x]* 1.1 Write property test for JWT round-trip fidelity (Property 1)
     - **Property 1: JWT Round-Trip Fidelity**
     - **Validates: Requirements 1.3**
     - File: `services/api/tests/test_auth.py`
     - Use `@given(st.text(min_size=1), st.text(min_size=1), st.lists(st.text()), st.integers(min_value=int(time.time())+1))`
     - Encode a token with a known secret, call `verify_jwt`, assert all four claims match
 
-  - [ ]* 1.2 Write property test for invalid JWT rejection (Property 2)
+  - [x]* 1.2 Write property test for invalid JWT rejection (Property 2)
     - **Property 2: Any Invalid JWT Is Always Rejected**
     - **Validates: Requirements 1.1, 1.2, 1.5**
     - File: `services/api/tests/test_auth.py`
     - Generate a valid JWT, mutate one or more bytes in the signature segment, assert `AuthError` is raised
     - Also test absent/empty `tenant_id` claim and expired `exp`
 
-  - [ ]* 1.3 Write unit tests for `verify_jwt` (example-based)
+  - [x]* 1.3 Write unit tests for `verify_jwt` (example-based)
     - Test valid token, expired token, wrong `alg`, tampered signature, missing `tenant_id`, missing `user_id`
     - _Requirements: 1.1, 1.2, 1.5_
 
@@ -42,14 +42,14 @@ tests (Hypothesis) are added as sub-tasks close to each implementation step.
     `services/api/src/omni_modal/security/rbac.py` as specified in design section 2.2
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.6_
 
-  - [ ]* 2.1 Write property test for RBAC role intersection (Property 4)
+  - [x]* 2.1 Write property test for RBAC role intersection (Property 4)
     - **Property 4: RBAC Raises Error Iff Role Intersection Is Empty**
     - **Validates: Requirements 2.1, 2.2, 2.3, 2.4, 2.6**
     - File: `services/api/tests/test_rbac.py`
     - Use `@given(st.frozensets(st.text()), st.sampled_from(list(ENDPOINT_ROLES.keys())))`
     - Assert `RbacError` iff `frozenset(roles) & required == ∅`
 
-  - [ ]* 2.2 Write unit tests for `assert_endpoint_roles` (example-based)
+  - [x]* 2.2 Write unit tests for `assert_endpoint_roles` (example-based)
     - Cover all three endpoints with permitted and impermissible role sets, and an unknown path
     - _Requirements: 2.1, 2.2, 2.3, 2.4_
 
@@ -58,21 +58,21 @@ tests (Hypothesis) are added as sub-tasks close to each implementation step.
     in `services/api/src/omni_modal/security/audit.py` as specified in design section 2.7
   - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5, 7.6, 7.7, 9.3_
 
-  - [ ]* 3.1 Write property test for monotonically increasing audit entry IDs (Property 13)
+  - [x]* 3.1 Write property test for monotonically increasing audit entry IDs (Property 13)
     - **Property 13: Audit Entry IDs Are Strictly Monotonically Increasing**
     - **Validates: Requirements 7.7**
     - File: `services/api/tests/test_audit.py`
     - Use `@given(st.integers(min_value=1, max_value=200))`
     - Call `record_tool_call` or `record_event` N times; assert IDs are `[1, 2, …, N]`
 
-  - [ ]* 3.2 Write property test for audit scrubbing (Property 14)
+  - [x]* 3.2 Write property test for audit scrubbing (Property 14)
     - **Property 14: Audit Scrubbing Preserves Primitives and Redacts Strings**
     - **Validates: Requirements 9.3**
     - File: `services/api/tests/test_audit.py`
     - Use `@given(st.dictionaries(st.text(), st.one_of(st.integers(), st.booleans(), st.floats(), st.text(), st.none())))`
     - Assert `_scrub(d)` preserves int/bool/float/None values and replaces all strings with `"<scrubbed>"`
 
-  - [ ]* 3.3 Write unit tests for `InMemoryAuditSink` (example-based)
+  - [x]* 3.3 Write unit tests for `InMemoryAuditSink` (example-based)
     - Test `record_tool_call` and `record_event`; verify `entries` list; verify monotonic ID;
       verify scrubbing; verify system event with `context=None`
     - _Requirements: 7.1, 7.7_
@@ -83,14 +83,14 @@ tests (Hypothesis) are added as sub-tasks close to each implementation step.
     `services/api/src/omni_modal/security/rate_limiting.py` as specified in design section 2.8
   - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6_
 
-  - [ ]* 4.1 Write property test for rate limiter window boundary (Property 15)
+  - [x]* 4.1 Write property test for rate limiter window boundary (Property 15)
     - **Property 15: Rate Limiter Allows Exactly `limit` Requests Per Window**
     - **Validates: Requirements 8.1, 8.2, 8.3, 8.6**
     - File: `services/api/tests/test_rate_limiter.py`
     - Use `@given(st.integers(min_value=1, max_value=30), st.integers(min_value=1, max_value=10))`
     - Configure a limiter with limit `L`; fire `L + k` requests; assert first `L` pass and remaining `k` raise `RateLimitExceeded`
 
-  - [ ]* 4.2 Write unit tests for `SlidingWindowRateLimiter` (example-based)
+  - [x]* 4.2 Write unit tests for `SlidingWindowRateLimiter` (example-based)
     - Test burst exactly at limit, burst exceeding limit, window expiry with mock time,
       `Retry-After` value, and all three bucket scopes (tenant, user, delegation)
     - _Requirements: 8.1, 8.2, 8.3, 8.6_
@@ -104,28 +104,28 @@ tests (Hypothesis) are added as sub-tasks close to each implementation step.
     as specified in design section 2.3
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6_
 
-  - [ ]* 6.1 Write property test for access guard membership correctness (Property 5)
+  - [x]* 6.1 Write property test for access guard membership correctness (Property 5)
     - **Property 5: Document Access Guard Returns Only Permitted Documents**
     - **Validates: Requirements 3.1, 3.2, 3.3, 3.4, 3.5**
     - File: `services/api/tests/test_document_access.py`
     - Use `@given(st.lists(st.builds(DocumentSummary, ...)), st.builds(ToolContext, ...))`
     - Assert guard result equals the sublist where `check_access` returns `True`
 
-  - [ ]* 6.2 Write property test for cross-tenant isolation (Property 6)
+  - [x]* 6.2 Write property test for cross-tenant isolation (Property 6)
     - **Property 6: Cross-Tenant Access Always Denied**
     - **Validates: Requirements 3.6**
     - File: `services/api/tests/test_document_access.py`
     - Use `@given(st.text(min_size=1), st.text(min_size=1))` with `assume(a != b)`
     - Assert `check_access` returns `False` for all visibility modes when tenant IDs differ
 
-  - [ ]* 6.3 Write property test for private visibility owner match (Property 7)
+  - [x]* 6.3 Write property test for private visibility owner match (Property 7)
     - **Property 7: Private Visibility Grants Access Iff Owner Matches**
     - **Validates: Requirements 3.1**
     - File: `services/api/tests/test_document_access.py`
     - Use `@given(st.text(min_size=1), st.text(min_size=1))` for `user_id` and `owner_id`
     - Assert `check_access` returns `True` iff `actor_user_id == owner_id`
 
-  - [ ]* 6.4 Write unit tests for `check_access` and `DocumentAccessGuard` (example-based)
+  - [x]* 6.4 Write unit tests for `check_access` and `DocumentAccessGuard` (example-based)
     - Cover all three visibility values, cross-tenant, restricted with allowed/denied users and roles
     - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6_
 
@@ -135,28 +135,28 @@ tests (Hypothesis) are added as sub-tasks close to each implementation step.
     `services/api/src/omni_modal/security/input_validation.py` as specified in design section 2.4
   - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.7_
 
-  - [ ]* 7.1 Write property test for query length boundary (Property 8)
+  - [x]* 7.1 Write property test for query length boundary (Property 8)
     - **Property 8: Query Length Validation Boundary**
     - **Validates: Requirements 4.3**
     - File: `services/api/tests/test_input_validation.py`
     - Use `@given(st.text(min_size=0, max_size=MAX_QUERY_CHARS * 2))`
     - Assert `ValidationError` iff `len(s) > MAX_QUERY_CHARS`
 
-  - [ ]* 7.2 Write property test for UUID v4 validation (Property 9)
+  - [x]* 7.2 Write property test for UUID v4 validation (Property 9)
     - **Property 9: UUID v4 Validation Accepts Valid, Rejects Invalid**
     - **Validates: Requirements 4.5**
     - File: `services/api/tests/test_input_validation.py`
     - Use `@given(st.uuids(version=4))` for valid and `@given(st.text())` for invalid
     - Assert valid UUIDs pass unchanged; non-matching strings raise `ValidationError`
 
-  - [ ]* 7.3 Write property test for tenant ID validation (Property 10)
+  - [x]* 7.3 Write property test for tenant ID validation (Property 10)
     - **Property 10: Tenant ID Validation Enforces Length and Type**
     - **Validates: Requirements 4.4**
     - File: `services/api/tests/test_input_validation.py`
     - Use `@given(st.one_of(st.text(min_size=0, max_size=256), st.integers(), st.none()))`
     - Assert accepts non-empty strings ≤ 128 chars; rejects all other inputs with `ValidationError`
 
-  - [ ]* 7.4 Write unit tests for input validators (example-based)
+  - [x]* 7.4 Write unit tests for input validators (example-based)
     - Boundary values for each function; test body size at exactly 1 MiB and 1 MiB + 1 byte
     - _Requirements: 4.1, 4.3, 4.4, 4.5_
 
@@ -166,7 +166,7 @@ tests (Hypothesis) are added as sub-tasks close to each implementation step.
     add the `ALLOWED_MIME_TYPES` and `EXTENSION_TO_MIME` constants
   - _Requirements: 5.1, 5.2, 5.3, 5.4_
 
-  - [ ]* 8.1 Write property test for upload safety size and MIME rejection (Property 16)
+  - [x]* 8.1 Write property test for upload safety size and MIME rejection (Property 16)
     - **Property 16: Upload Safety Rejects Oversized or Disallowed MIME Files**
     - **Validates: Requirements 5.1, 5.2**
     - File: `services/api/tests/test_upload_safety.py`
@@ -174,7 +174,7 @@ tests (Hypothesis) are added as sub-tasks close to each implementation step.
       `st.sampled_from(...)` for MIME strings; mock `file_path.stat()` and `sniff_mime_type`
     - Assert `UploadSafetyError` when size exceeds limit or MIME is not in `ALLOWED_MIME_TYPES`
 
-  - [ ]* 8.2 Write unit tests for `assert_upload_safe` (example-based)
+  - [x]* 8.2 Write unit tests for `assert_upload_safe` (example-based)
     - Test file at 50 MiB, 50 MiB + 1 byte; test each allowed extension; test MIME mismatch;
       test that `file_size_bytes` and `detected_mime` are returned on success
     - _Requirements: 5.1, 5.2, 5.3, 5.4_
@@ -185,21 +185,21 @@ tests (Hypothesis) are added as sub-tasks close to each implementation step.
     in design section 2.6
   - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5_
 
-  - [ ]* 9.1 Write property test for redactor no-chunk-leak invariant (Property 11)
+  - [x]* 9.1 Write property test for redactor no-chunk-leak invariant (Property 11)
     - **Property 11: Redactor Never Leaks Chunk Content in Internal Status**
     - **Validates: Requirements 6.1, 6.4**
     - File: `services/api/tests/test_redactor.py`
     - Use `@given(st.lists(st.text(min_size=16)), st.builds(A2AResearchRequest, ...))`
     - Assert no verbatim substring ≥ 16 chars from any chunk text appears in `result.internal_status`
 
-  - [ ]* 9.2 Write property test for redactor truncation invariant (Property 12)
+  - [x]* 9.2 Write property test for redactor truncation invariant (Property 12)
     - **Property 12: Redactor Always Truncates Internal Status to Maximum Length**
     - **Validates: Requirements 6.4**
     - File: `services/api/tests/test_redactor.py`
     - Use `@given(st.text(min_size=0, max_size=2000))` for `internal_status`
     - Assert `len(result.internal_status) <= MAX_INTERNAL_STATUS_CHARS` for all inputs
 
-  - [ ]* 9.3 Write unit tests for `redact_request` (example-based)
+  - [x]* 9.3 Write unit tests for `redact_request` (example-based)
     - Test truncation at exactly 500 chars and 501 chars; fingerprint replacement; `ContentLeakError`
       when question contains chunk content prefix
     - _Requirements: 6.1, 6.2, 6.4, 6.5_
@@ -270,7 +270,7 @@ tests (Hypothesis) are added as sub-tasks close to each implementation step.
     from cookies or URL parameters
   - _Requirements: 10.1, 10.2, 10.3_
 
-  - [ ]* 13.1 Write unit tests for the Next.js middleware (TypeScript)
+  - [x]* 13.1 Write unit tests for the Next.js middleware (TypeScript)
     - Mock `NextRequest` / `NextResponse` and `getServerSession`; test unauthenticated redirect,
       researcher role on admin path returns 403, admin role on admin path passes through
     - _Requirements: 10.1, 10.2, 10.3_
@@ -280,7 +280,7 @@ tests (Hypothesis) are added as sub-tasks close to each implementation step.
     specified in design section 2.9; use `ALLOWED_EXTENSIONS` set and `MAX_FILE_BYTES` constant
   - _Requirements: 10.5_
 
-  - [ ]* 14.1 Write property test for frontend upload validation (Property 18)
+  - [x]* 14.1 Write property test for frontend upload validation (Property 18)
     - **Property 18: Frontend Upload Validation Rejects Disallowed Extensions and Oversized Files**
     - **Validates: Requirements 10.5**
     - File: `services/api/tests/test_auth.py` is Python-only; write a TypeScript test
@@ -288,13 +288,13 @@ tests (Hypothesis) are added as sub-tasks close to each implementation step.
     - Use fast-check or a loop over generated inputs: random extensions and sizes;
       assert `null` for allowed extension + size ≤ limit, non-null otherwise
 
-  - [ ]* 14.2 Write unit tests for `validateUploadFile` (example-based)
+  - [x]* 14.2 Write unit tests for `validateUploadFile` (example-based)
     - Test each allowed extension at exactly 50 MiB and 50 MiB + 1 byte; test each disallowed
       extension; test extension case-sensitivity
     - _Requirements: 10.5_
 
 - [x] 15. Add `SecretRef` no-leak property test
-  - [ ]* 15.1 Write property test for `SecretRef` string representation (Property 17)
+  - [x]* 15.1 Write property test for `SecretRef` string representation (Property 17)
     - **Property 17: SecretRef String Representation Never Reveals Secret Value**
     - **Validates: Requirements 9.5**
     - File: `services/api/tests/test_auth.py` (or a dedicated `test_secrets.py`)
@@ -302,7 +302,7 @@ tests (Hypothesis) are added as sub-tasks close to each implementation step.
     - Assert neither `str(SecretRef(name=n))` nor `repr(SecretRef(name=n))` contains the raw value `v`
 
 - [x] 16. Add property test for unauthenticated non-health paths (Property 3)
-  - [ ]* 16.1 Write property test for HTTP 401 on any non-health path without token
+  - [x]* 16.1 Write property test for HTTP 401 on any non-health path without token
     - **Property 3: Unauthenticated Requests to Any Non-Health Path Are Rejected**
     - **Validates: Requirements 1.4**
     - File: `services/api/tests/test_auth.py`

@@ -6,6 +6,7 @@ import { MaterialIcon } from "@/components/material-icon";
 import { TopBar } from "@/components/top-bar";
 import { apiRequest } from "@/lib/api-client";
 import { getClientApiConfig } from "@/lib/env";
+import { withWorkspaceQuery } from "@/lib/workspace";
 
 type Classification = "Confidential" | "Internal" | "Legal Hold" | "Public";
 
@@ -42,7 +43,7 @@ export default function ArchivesPage() {
 
   useEffect(() => {
     setLoading(true);
-    apiRequest("/archives", { method: "GET", headers }, { baseUrl })
+    apiRequest(withWorkspaceQuery("/archives"), { method: "GET", headers }, { baseUrl })
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();

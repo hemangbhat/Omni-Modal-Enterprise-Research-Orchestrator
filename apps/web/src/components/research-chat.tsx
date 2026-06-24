@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { MaterialIcon } from "@/components/material-icon";
 import { apiRequest, captureQueryError } from "@/lib/api-client";
 import { getClientApiConfig } from "@/lib/env";
@@ -13,6 +13,36 @@ type SourceCitation = {
 
 type HistoryEntry = { id: string; question: string; time: string };
 
+const HISTORY_KEY = "omni_research_history";
+const HISTORY_LIMIT = 50;
+
+function loadHistory(): HistoryEntry[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(HISTORY_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (e): e is HistoryEntry =>
+        !!e &&
+        typeof (e as HistoryEntry).id === "string" &&
+        typeof (e as HistoryEntry).question === "string"
+    );
+  } catch {
+    return [];
+  }
+}
+
+function saveHistory(entries: HistoryEntry[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(HISTORY_KEY, JSON.stringify(entries.slice(0, HISTORY_LIMIT)));
+  } catch {
+    /* ignore quota / unavailable storage */
+  }
+}
+
 export function ResearchChat() {
   const [prompt, setPrompt] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
@@ -24,13 +54,31 @@ export function ResearchChat() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const answerRef = useRef("");
 
-  async function submitPrompt() {
-    const trimmed = prompt.trim();
+  // Restore persisted query history on mount so prior queries are visible
+  // immediately (not only after sending a new one).
+  useEffect(() => {
+    setHistory(loadHistory());
+  }, []);
+
+  async function submitPrompt(explicitQuestion?: string) {
+    const trimmed = (explicitQuestion ?? prompt).trim();
     if (!trimmed || isStreaming) return;
 
-    const id = `q-${Date.now()}`;
-    const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    setHistory((current) => [{ id, question: trimmed, time }, ...current]);
+    // Reuse an existing history entry when re-running a past query; otherwise
+    // create a new one. `id`/`time` are computed synchronously so they're
+    // available immediately; the updater persists the reordered list.
+    const existing = history.find((entry) => entry.question === trimmed);
+    const id = existing ? existing.id : `q-${Date.now()}`;
+    const time = existing
+      ? existing.time
+      : new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+    setHistory((current) => {
+      const without = current.filter((entry) => entry.id !== id);
+      const next = [{ id, question: trimmed, time }, ...without];
+      saveHistory(next);
+      return next;
+    });
     setActiveId(id);
     setActiveQuestion(trimmed);
     setPrompt("");
@@ -83,10 +131,22 @@ export function ResearchChat() {
     <div className="flex h-[calc(100vh)] max-w-max_width md:h-screen">
       {/* Column 1: Query History */}
       <aside className="relative z-10 hidden w-[300px] flex-col border-r border-outline-variant/10 bg-surface-container-lowest/30 shadow-[4px_0_24px_rgba(0,0,0,0.1)] backdrop-blur-md lg:flex">
-        <div className="px-xl py-lg">
+        <div className="flex items-center justify-between px-xl py-lg">
           <h2 className="font-mono-sm text-[11px] font-medium uppercase tracking-[0.15em] text-on-surface-variant">
             Recent Queries
           </h2>
+          {history.length > 0 ? (
+            <button
+              type="button"
+              onClick={() => {
+                setHistory([]);
+                saveHistory([]);
+              }}
+              className="font-mono-sm text-[10px] uppercase tracking-wider text-on-surface-variant/60 transition-colors hover:text-error"
+            >
+              Clear
+            </button>
+          ) : null}
         </div>
         <div className="flex flex-1 flex-col gap-md overflow-y-auto px-lg pb-lg">
           {history.length === 0 ? (
@@ -103,6 +163,7 @@ export function ResearchChat() {
                   onClick={() => {
                     setActiveId(entry.id);
                     setActiveQuestion(entry.question);
+                    void submitPrompt(entry.question);
                   }}
                   className={
                     active

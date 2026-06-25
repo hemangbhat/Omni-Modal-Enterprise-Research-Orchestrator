@@ -27,10 +27,7 @@ services:
 
       # ── Embeddings ────────────────────────────────────────────────────────
       - key: EMBEDDING_BACKEND
-        value: sentence-transformers
-
-      - key: SENTENCE_TRANSFORMERS_MODEL
-        value: BAAI/bge-small-en-v1.5
+        value: hashing
 
       - key: EMBEDDING_DIMENSIONS
         value: "384"

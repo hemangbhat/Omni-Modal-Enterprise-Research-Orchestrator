@@ -11,29 +11,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml ./
 COPY src/ ./src/
 
-RUN pip install --no-cache-dir -e ".[db,observability,performance,api,saas]"
+RUN pip install --no-cache-dir -e ".[db,observability,api,saas]"
 
-# Install sentence-transformers for real semantic embeddings (bge-small-en-v1.5).
-# Adds ~300MB to image. Remove this line to fall back to hashing embeddings.
-RUN pip install --no-cache-dir sentence-transformers
-
-# Pre-download the bge-small-en-v1.5 model so startup is fast in production.
-# Remove the two lines below if you prefer to lazy-load on first request.
-RUN python -c "\
-from sentence_transformers import SentenceTransformer; \
-SentenceTransformer('BAAI/bge-small-en-v1.5')"
+# sentence-transformers (~400MB RAM) is NOT installed here — Render free tier
+# is 512MB and the model load OOMs. Use hashing embeddings on free tier.
+# Set EMBEDDING_BACKEND=sentence-transformers on a paid instance (512MB+).
 
 EXPOSE 8000
 
-# Run as non-root for security
 RUN useradd -m -u 1000 omero
 USER omero
 
 ENV HOST=0.0.0.0
 ENV PORT=8000
-ENV EMBEDDING_BACKEND=sentence-transformers
-ENV SENTENCE_TRANSFORMERS_MODEL=BAAI/bge-small-en-v1.5
+ENV EMBEDDING_BACKEND=hashing
 ENV EMBEDDING_DIMENSIONS=384
 
-# Use the FastAPI app (async, Pydantic validation, OpenAPI at /docs)
 CMD ["python", "-m", "omni_modal.api"]

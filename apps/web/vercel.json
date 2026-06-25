@@ -3,13 +3,10 @@
   "buildCommand": "next build",
   "outputDirectory": ".next",
   "installCommand": "npm install --legacy-peer-deps",
-  "env": {
-    "NEXT_PUBLIC_APP_NAME": "Omni-Modal Research Orchestrator"
-  },
   "rewrites": [
     {
-      "source": "/api/:path*",
-      "destination": "https://your-backend-url.com/:path*"
+      "source": "/api/proxy/:path*",
+      "destination": "https://omero-api.onrender.com/:path*"
     }
   ]
 }

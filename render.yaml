@@ -1,0 +1,76 @@
+services:
+  - type: web
+    name: omero-api
+    runtime: docker
+    dockerfilePath: ./services/api/Dockerfile
+    dockerContext: ./services/api
+    plan: free        # upgrade to starter ($7/mo) for always-on
+    region: oregon    # or singapore for lower latency from India
+    healthCheckPath: /health
+    envVars:
+      # ── Required ──────────────────────────────────────────────────────────
+      - key: JWT_SECRET
+        sync: false   # paste in Render dashboard → Environment
+
+      - key: DATABASE_URL
+        sync: false   # your Neon connection string
+
+      # ── LLM answers ──────────────────────────────────────────────────────
+      - key: GROQ_API_KEY
+        sync: false   # free at console.groq.com
+
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+
+      - key: LLM_ANSWER_GENERATION_ENABLED
+        value: "true"
+
+      # ── Embeddings ────────────────────────────────────────────────────────
+      - key: EMBEDDING_BACKEND
+        value: sentence-transformers
+
+      - key: SENTENCE_TRANSFORMERS_MODEL
+        value: BAAI/bge-small-en-v1.5
+
+      - key: EMBEDDING_DIMENSIONS
+        value: "384"
+
+      # ── Observability ─────────────────────────────────────────────────────
+      - key: SENTRY_DSN
+        sync: false   # optional
+
+      - key: ENVIRONMENT
+        value: production
+
+      # ── Storage ───────────────────────────────────────────────────────────
+      - key: S3_BUCKET
+        sync: false   # optional: omero-ai
+
+      - key: S3_REGION
+        sync: false
+
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+
+      # ── Email ─────────────────────────────────────────────────────────────
+      - key: RESEND_API_KEY
+        sync: false   # optional
+
+      # ── Billing ───────────────────────────────────────────────────────────
+      - key: STRIPE_SECRET_KEY
+        sync: false   # optional test key
+
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false   # optional
+
+      # ── CORS ──────────────────────────────────────────────────────────────
+      # Set to your Vercel frontend URL after deploying, e.g.:
+      # https://omero.vercel.app
+      - key: CORS_ALLOW_ORIGINS
+        value: "*"   # tighten to your Vercel URL after first deploy
+
+      - key: APP_BASE_URL
+        sync: false  # your Vercel frontend URL, e.g. https://omero.vercel.app

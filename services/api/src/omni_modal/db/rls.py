@@ -18,8 +18,19 @@ next checkout.
 
 from __future__ import annotations
 
+import os
 from contextlib import contextmanager
 from typing import Iterator
+
+
+def rls_enabled() -> bool:
+    """True when DB-enforced tenant isolation should be applied.
+
+    Off by default so enabling it is a deliberate, ops-controlled step (the
+    ``0008_rls.sql`` policies must be applied first). Set ``RLS_ENFORCEMENT=true``
+    to turn it on.
+    """
+    return os.environ.get("RLS_ENFORCEMENT", "false").lower() == "true"
 
 
 def set_tenant(conn, tenant_id: str, *, local: bool = True) -> None:
@@ -30,6 +41,17 @@ def set_tenant(conn, tenant_id: str, *, local: bool = True) -> None:
     """
     with conn.cursor() as cur:
         cur.execute("SELECT set_config('app.tenant_id', %s, %s)", (tenant_id, local))
+
+
+def apply_tenant(conn, tenant_id: str) -> None:
+    """Bind the tenant GUC only when RLS enforcement is enabled (no-op otherwise).
+
+    Call this as the first statement inside the transaction that runs
+    tenant-scoped queries. When ``RLS_ENFORCEMENT`` is unset, this does nothing,
+    so the default behaviour is byte-for-byte unchanged.
+    """
+    if rls_enabled() and tenant_id:
+        set_tenant(conn, tenant_id, local=True)
 
 
 @contextmanager

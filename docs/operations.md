@@ -64,9 +64,13 @@ it too, so a single missing `WHERE` clause cannot leak across tenants.
 - **Strict mode:** once every tenant-scoped query path sets the GUC, remove the
   `current_setting(...) IS NULL` escape from each policy to fail closed.
 
-Helper is unit-tested; wiring `set_tenant` into each pooled transaction is the
-remaining step to make enforcement active (it is available but not yet forced on
-every query path, to avoid destabilising the running app).
+Helper is unit-tested. Enforcement is wired (flag-gated) into the data-plane
+queries — `PgVectorChunkRetriever` (read) and `PostgresChunkPersistence` (write)
+bind `app.tenant_id` per transaction when `RLS_ENFORCEMENT=true`. To activate:
+apply `0008_rls.sql`, then set `RLS_ENFORCEMENT=true`. It is off by default so
+the running app is unaffected until you opt in. Binding the GUC on the SaaS
+metadata repositories (orgs/workspaces/usage/notifications) is the remaining
+follow-up; those tables already have policies.
 
 ---
 

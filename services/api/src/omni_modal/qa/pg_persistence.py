@@ -65,6 +65,9 @@ class PostgresChunkPersistence:
 
         with self._connect() as conn:
             with conn.transaction():
+                from omni_modal.db.rls import apply_tenant  # noqa: PLC0415
+
+                apply_tenant(conn, result.tenant_id)
                 with conn.cursor() as cur:
                     owner_uuid = self._ensure_user(cur, result.tenant_id, result.owner_id)
                     self._upsert_document(cur, result, owner_uuid, source_type)

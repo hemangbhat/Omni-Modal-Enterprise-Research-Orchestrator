@@ -109,44 +109,56 @@ class PgVectorChunkRetriever:
                     else:
                         _conn_ctx = psycopg.connect(self._database_url, row_factory=dict_row)
                     with _conn_ctx as connection:
-                        if self._pool is not None:
-                            # pool connections need row_factory set on the cursor
-                            from psycopg.rows import dict_row as _dict_row  # noqa: PLC0415
-                            _cursor_ctx = connection.cursor(row_factory=_dict_row)
-                        else:
-                            _cursor_ctx = connection.cursor()
-                        with _cursor_ctx as cursor:
-                            cursor.execute(
-                                """
-                                select
-                                  c.id as chunk_id,
-                                  d.id as document_id,
-                                  d.title,
-                                  d.source_type,
-                                  c.chunk_index,
-                                  c.content,
-                                  1 - (e.embedding <=> %s::vector) as similarity,
-                                  c.metadata
-                                from embeddings e
-                                inner join document_chunks c on c.id = e.chunk_id
-                                inner join documents d on d.id = e.document_id
-                                where e.tenant_id = %s
-                                  and d.status = 'ready'
-                                  and (%s = 0 or 1 - (e.embedding <=> %s::vector) >= %s)
-                                order by e.embedding <=> %s::vector
-                                limit %s
-                                """,
-                                (
-                                    vector_literal,
-                                    request.tenant_id,
-                                    request.min_similarity,
-                                    vector_literal,
-                                    request.min_similarity,
-                                    vector_literal,
-                                    request.top_k,
-                                ),
-                            )
-                            rows = cursor.fetchall()
+                        # Optional DB-enforced tenant isolation (RLS). No-op
+                        # unless RLS_ENFORCEMENT=true; uses a txn-local GUC so a
+                        # pooled connection never leaks one tenant's binding.
+                        import contextlib  # noqa: PLC0415
+
+                        from omni_modal.db.rls import apply_tenant, rls_enabled  # noqa: PLC0415
+
+                        _use_txn = self._pool is not None and rls_enabled()
+                        _txn_ctx = connection.transaction() if _use_txn else contextlib.nullcontext()
+                        with _txn_ctx:
+                            if _use_txn:
+                                apply_tenant(connection, request.tenant_id)
+                            if self._pool is not None:
+                                # pool connections need row_factory set on the cursor
+                                from psycopg.rows import dict_row as _dict_row  # noqa: PLC0415
+                                _cursor_ctx = connection.cursor(row_factory=_dict_row)
+                            else:
+                                _cursor_ctx = connection.cursor()
+                            with _cursor_ctx as cursor:
+                                cursor.execute(
+                                    """
+                                    select
+                                      c.id as chunk_id,
+                                      d.id as document_id,
+                                      d.title,
+                                      d.source_type,
+                                      c.chunk_index,
+                                      c.content,
+                                      1 - (e.embedding <=> %s::vector) as similarity,
+                                      c.metadata
+                                    from embeddings e
+                                    inner join document_chunks c on c.id = e.chunk_id
+                                    inner join documents d on d.id = e.document_id
+                                    where e.tenant_id = %s
+                                      and d.status = 'ready'
+                                      and (%s = 0 or 1 - (e.embedding <=> %s::vector) >= %s)
+                                    order by e.embedding <=> %s::vector
+                                    limit %s
+                                    """,
+                                    (
+                                        vector_literal,
+                                        request.tenant_id,
+                                        request.min_similarity,
+                                        vector_literal,
+                                        request.min_similarity,
+                                        vector_literal,
+                                        request.top_k,
+                                    ),
+                                )
+                                rows = cursor.fetchall()
                 except Exception as exc:
                     query_hash = hashlib.md5(request.question.encode()).hexdigest()
                     failure_classification = _classify_retrieval_error(exc)

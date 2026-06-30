@@ -97,3 +97,134 @@ def test_set_tenant_non_local():
     conn = _FakeConn()
     set_tenant(conn, "t1", local=False)
     assert conn.calls[0][1] == ("t1", False)
+
+
+def test_rls_disabled_by_default(monkeypatch):
+    from omni_modal.db import rls
+
+    monkeypatch.delenv("RLS_ENFORCEMENT", raising=False)
+    assert rls.rls_enabled() is False
+
+
+def test_rls_enabled_via_env(monkeypatch):
+    from omni_modal.db import rls
+
+    monkeypatch.setenv("RLS_ENFORCEMENT", "true")
+    assert rls.rls_enabled() is True
+
+
+def test_apply_tenant_noop_when_disabled(monkeypatch):
+    from omni_modal.db.rls import apply_tenant
+
+    monkeypatch.delenv("RLS_ENFORCEMENT", raising=False)
+    conn = _FakeConn()
+    apply_tenant(conn, "t1")
+    assert conn.calls == []  # no GUC set when enforcement is off
+
+
+def test_apply_tenant_sets_guc_when_enabled(monkeypatch):
+    from omni_modal.db.rls import apply_tenant
+
+    monkeypatch.setenv("RLS_ENFORCEMENT", "true")
+    conn = _FakeConn()
+    apply_tenant(conn, "t1")
+    assert len(conn.calls) == 1
+    assert conn.calls[0][1] == ("t1", True)
+
+
+def test_apply_tenant_ignores_empty_tenant(monkeypatch):
+    from omni_modal.db.rls import apply_tenant
+
+    monkeypatch.setenv("RLS_ENFORCEMENT", "true")
+    conn = _FakeConn()
+    apply_tenant(conn, "")
+    assert conn.calls == []
+
+
+# ── Retrieval path binds the tenant GUC when RLS is enabled ─────────────────
+class _RlsCursor:
+    def __init__(self, sink):
+        self._sink = sink
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        self._sink.append((sql, params))
+
+    def fetchall(self):
+        return []
+
+
+class _RlsConn:
+    def __init__(self):
+        self.calls: list = []
+
+    def transaction(self):
+        outer = self
+
+        class _T:
+            def __enter__(self_):
+                return outer
+
+            def __exit__(self_, *a):
+                return False
+
+        return _T()
+
+    def cursor(self, row_factory=None):
+        return _RlsCursor(self.calls)
+
+
+class _RlsPool:
+    def __init__(self):
+        self.conn = _RlsConn()
+
+    def connection(self):
+        conn = self.conn
+
+        class _C:
+            def __enter__(self_):
+                return conn
+
+            def __exit__(self_, *a):
+                return False
+
+        return _C()
+
+
+class _FakeProvider:
+    def embed_query(self, _q: str):
+        return [0.1, 0.2, 0.3]
+
+
+def test_retrieval_binds_tenant_guc_when_rls_enabled(monkeypatch):
+    monkeypatch.setenv("RLS_ENFORCEMENT", "true")
+    from omni_modal.qa.models import QueryRequest
+    from omni_modal.qa.retrieval import PgVectorChunkRetriever
+
+    pool = _RlsPool()
+    retriever = PgVectorChunkRetriever(_FakeProvider(), pool=pool)
+    req = QueryRequest(tenant_id="tenant-rls", user_id="u1", question="hello", top_k=5)
+    rows = retriever.retrieve(req)
+    assert rows == []
+    # The GUC must have been set with the request's tenant inside the txn.
+    assert any(
+        "set_config('app.tenant_id'" in sql and params == ("tenant-rls", True)
+        for sql, params in pool.conn.calls
+    )
+
+
+def test_retrieval_skips_guc_when_rls_disabled(monkeypatch):
+    monkeypatch.delenv("RLS_ENFORCEMENT", raising=False)
+    from omni_modal.qa.models import QueryRequest
+    from omni_modal.qa.retrieval import PgVectorChunkRetriever
+
+    pool = _RlsPool()
+    retriever = PgVectorChunkRetriever(_FakeProvider(), pool=pool)
+    req = QueryRequest(tenant_id="tenant-rls", user_id="u1", question="hello", top_k=5)
+    retriever.retrieve(req)
+    assert not any("set_config" in sql for sql, _ in pool.conn.calls)

@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from omni_modal.entity_extraction.service import EntityExtractionService
 from omni_modal.ingestion import MultimodalIngestionPipeline
 from omni_modal.ingestion.async_queue import AsyncIngestionQueue
+from omni_modal.ingestion.redis_queue import select_ingestion_queue
 from omni_modal.ingestion.extractors import LocalWhisperTranscriber
 from omni_modal.ingestion.http_contract import (
     IngestionContractError,
@@ -46,6 +47,9 @@ from omni_modal.saas.plans import PLANS, PlanLimitExceeded
 from omni_modal.security.accounts import AccountError, get_account_service
 from omni_modal.security.auth import AuthError, JwtClaims, _make_jwt, jwt_secret_from_env, verify_jwt
 from omni_modal.security.rbac import RbacError, assert_endpoint_roles
+from omni_modal.security.rate_limiting import RateLimitExceeded
+from omni_modal.security.redis_rate_limiter import select_rate_limiter
+from omni_modal.qa.redis_cache import select_query_cache
 
 
 # ── Pydantic schemas ─────────────────────────────────────────────────────
@@ -67,6 +71,17 @@ class AuthResponse(BaseModel):
     roles: list[str]
     email: str
     expires_at: int
+    access_expires_at: int | None = None
+    refresh_token: str | None = None
+    refresh_expires_at: int | None = None
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+class LogoutRequest(BaseModel):
+    refresh_token: str
 
 
 class QueryRequestModel(BaseModel):
@@ -122,6 +137,9 @@ class _State:
     entity_service: Any = None
     vector_store: Any = None
     audit_sink: Any = None
+    rate_limiter: Any = None
+    query_cache: Any = None
+    sessions: Any = None
 
 
 state = _State()
@@ -137,11 +155,16 @@ def _build_runtime() -> None:
     audio = LocalWhisperTranscriber(model=whisper_model) if whisper_model else None
     state.entity_service = EntityExtractionService()
 
+    # Shared coordination primitives — Redis-backed when REDIS_URL is set
+    # (stateless, horizontally-scalable web tier), else in-process.
+    state.query_cache = select_query_cache()
+    state.rate_limiter = select_rate_limiter()
+
     if os.environ.get("DATABASE_URL"):
         from omni_modal.qa.pg_persistence import PostgresChunkPersistence  # noqa: PLC0415
 
         state.vector_store = None
-        retriever = PgVectorChunkRetriever(provider)
+        retriever = PgVectorChunkRetriever(provider, cache=state.query_cache)
         pipeline = MultimodalIngestionPipeline(
             audio_transcriber=audio,
             persistence=PostgresChunkPersistence(
@@ -158,13 +181,20 @@ def _build_runtime() -> None:
             persistence=InMemoryChunkPersistence(state.vector_store, provider),
         )
 
-    state.queue = AsyncIngestionQueue(pipeline)
+    state.queue = select_ingestion_queue(
+        pipeline,
+        cache_evict_callback=state.query_cache.evict_tenant,
+        entity_service=state.entity_service,
+    )
     state.queue.start_worker()
     state.workflow = InternalResearchAdkWorkflow(
         retriever, external_client_from_environment(), select_answer_synthesizer()
     )
     state.saas = get_saas_service()
     state.accounts = get_account_service()
+    from omni_modal.security.sessions import select_session_service  # noqa: PLC0415
+
+    state.sessions = select_session_service()
     from omni_modal.security.pg_audit_sink import select_audit_sink  # noqa: PLC0415
 
     state.audit_sink = select_audit_sink()
@@ -191,15 +221,33 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    from omni_modal.api.middleware import install_observability  # noqa: PLC0415
+
+    install_observability(app)
+
     # ── Auth dependency ──────────────────────────────────────────────────
     def current_claims(authorization: str | None = Header(default=None)) -> JwtClaims:
         if not authorization or not authorization.lower().startswith("bearer "):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token.")
         token = authorization.split(" ", 1)[1].strip()
         try:
-            return verify_jwt(token, jwt_secret_from_env())
+            claims = verify_jwt(token, jwt_secret_from_env())
         except AuthError as exc:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc)) from exc
+
+        # Distributed (or in-process) rate limiting, applied to every
+        # authenticated request — mirrors the stdlib server.
+        if state.rate_limiter is not None:
+            try:
+                state.rate_limiter.check_tenant(claims.tenant_id)
+                state.rate_limiter.check_user(claims.tenant_id, claims.user_id)
+            except RateLimitExceeded as exc:
+                raise HTTPException(
+                    status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=f"Rate limit exceeded. Retry after {exc.retry_after}s.",
+                    headers={"Retry-After": str(exc.retry_after)},
+                ) from exc
+        return claims
 
     def require_roles(path: str):
         def _dep(claims: JwtClaims = Depends(current_claims)) -> JwtClaims:
@@ -224,13 +272,65 @@ def create_app() -> FastAPI:
     async def health() -> dict:
         return Phase1Orchestrator().health()
 
+    @app.get("/health/ready", tags=["system"])
+    async def readiness():
+        """Readiness probe: verifies configured dependencies are reachable.
+
+        Liveness (`/health`) only says the process is up; readiness says it can
+        actually serve traffic. Returns 503 when a *configured* dependency
+        (Postgres, Redis) is unreachable so orchestrators can route around it.
+        """
+        from fastapi.responses import JSONResponse  # noqa: PLC0415
+
+        checks: dict[str, str] = {}
+        ok = True
+
+        if os.environ.get("DATABASE_URL"):
+            try:
+                from omni_modal.db.pool import get_connection_pool  # noqa: PLC0415
+
+                pool = get_connection_pool()
+                with pool.connection() as conn, conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                    cur.fetchone()
+                checks["database"] = "ok"
+            except Exception as exc:  # noqa: BLE001
+                checks["database"] = f"error: {type(exc).__name__}"
+                ok = False
+        else:
+            checks["database"] = "in-memory (not configured)"
+
+        if os.environ.get("REDIS_URL"):
+            try:
+                from omni_modal.cache.redis_client import get_redis_client  # noqa: PLC0415
+
+                client = get_redis_client()
+                if client is not None and client.ping():
+                    checks["redis"] = "ok"
+                else:
+                    checks["redis"] = "unreachable"
+                    ok = False
+            except Exception as exc:  # noqa: BLE001
+                checks["redis"] = f"error: {type(exc).__name__}"
+                ok = False
+        else:
+            checks["redis"] = "in-process (not configured)"
+
+        body = {"status": "ready" if ok else "not_ready", "checks": checks}
+        return JSONResponse(body, status_code=200 if ok else 503)
+
+    @app.get("/metrics", tags=["system"])
+    async def prometheus_metrics():
+        """Prometheus text exposition of request counters + latency histograms."""
+        from fastapi.responses import PlainTextResponse  # noqa: PLC0415
+
+        from omni_modal.metrics import metrics  # noqa: PLC0415
+
+        return PlainTextResponse(metrics.render(), media_type="text/plain; version=0.0.4")
+
     # ── Auth ─────────────────────────────────────────────────────────────
     def _issue(account) -> AuthResponse:
-        exp = int(time.time()) + 7 * 24 * 3600
-        token = _make_jwt(account.tenant_id, account.user_id, list(account.roles), exp,
-                          jwt_secret_from_env())
-        return AuthResponse(token=token, tenant_id=account.tenant_id, user_id=account.user_id,
-                            roles=list(account.roles), email=account.email, expires_at=exp)
+        return AuthResponse(**state.sessions.issue(account))
 
     @app.post("/auth/register", response_model=AuthResponse, status_code=201, tags=["auth"])
     async def register(body: RegisterRequest) -> AuthResponse:
@@ -241,6 +341,19 @@ def create_app() -> FastAPI:
         except AccountError as exc:
             raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
         return _issue(account)
+
+    @app.post("/auth/refresh", response_model=AuthResponse, tags=["auth"])
+    async def refresh(body: RefreshRequest) -> AuthResponse:
+        from omni_modal.security.sessions import RefreshTokenError  # noqa: PLC0415
+
+        try:
+            return AuthResponse(**state.sessions.refresh(body.refresh_token))
+        except RefreshTokenError as exc:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc)) from exc
+
+    @app.post("/auth/logout", tags=["auth"])
+    async def logout(body: LogoutRequest) -> dict:
+        return {"revoked": state.sessions.revoke(body.refresh_token)}
 
     @app.post("/auth/login", response_model=AuthResponse, tags=["auth"])
     async def login(body: LoginRequest) -> AuthResponse:

@@ -49,7 +49,7 @@ export default function SignInPage() {
     setError(null);
     try {
       const result = await login(email.trim(), password);
-      signIn(result.token);
+      signIn(result.token, result.refresh_token);
       router.replace("/");
     } catch (err) {
       setError((err as Error).message);

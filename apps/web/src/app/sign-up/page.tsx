@@ -46,7 +46,7 @@ export default function SignUpPage() {
     setError(null);
     try {
       const result = await register(email.trim(), password);
-      signIn(result.token);
+      signIn(result.token, result.refresh_token);
       router.replace("/");
     } catch (err) {
       setError((err as Error).message);

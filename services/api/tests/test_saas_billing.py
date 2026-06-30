@@ -190,6 +190,21 @@ class WebhookSyncTests(unittest.TestCase):
         assert org is not None
         self.assertEqual(org.plan_id, "free")
 
+    def test_payment_failed_notifies_owner(self) -> None:
+        # Attach a customer so the webhook can resolve the org.
+        self.svc.workspaces.set_stripe_ids(
+            self.svc.workspaces.get_org_by_tenant(self.tenant).id, customer_id="cus_wh"
+        )
+        before = self.svc.notifications.unread_count(self.tenant)
+        event = {
+            "type": "invoice.payment_failed",
+            "data": {"object": {"customer": "cus_wh"}},
+        }
+        self.svc.apply_webhook_event(event)
+        after = self.svc.notifications.list_for(self.tenant)
+        self.assertGreater(self.svc.notifications.unread_count(self.tenant), before)
+        self.assertTrue(any("Payment failed" in n.title for n in after))
+
 
 if __name__ == "__main__":
     unittest.main()

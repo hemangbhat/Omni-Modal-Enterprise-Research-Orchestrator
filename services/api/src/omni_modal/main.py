@@ -27,6 +27,7 @@ observability.init()
 atexit.register(observability.flush)
 from omni_modal.ingestion import InMemoryIngestionQueue, MultimodalIngestionPipeline
 from omni_modal.ingestion.async_queue import AsyncIngestionQueue
+from omni_modal.ingestion.redis_queue import select_ingestion_queue
 from omni_modal.ingestion.extractors import LocalWhisperTranscriber
 from omni_modal.ingestion.http_contract import (
     IngestionContractError,
@@ -52,13 +53,16 @@ from omni_modal.qa.in_memory_store import (
     InMemoryVectorStore,
 )
 from omni_modal.qa.cache import QueryCache
+from omni_modal.qa.redis_cache import select_query_cache
 from omni_modal.db.pool import get_connection_pool, close_connection_pool, reset_pool_for_testing
 from omni_modal.security.auth import verify_jwt, jwt_secret_from_env, AuthError, JwtClaims, _make_jwt
 from omni_modal.security.accounts import AccountError, get_account_service
+from omni_modal.security.sessions import select_session_service, RefreshTokenError
 from omni_modal.security.rbac import assert_endpoint_roles, RbacError
 from omni_modal.security.audit import InMemoryAuditSink
 from omni_modal.security.pg_audit_sink import select_audit_sink
 from omni_modal.security.rate_limiting import SlidingWindowRateLimiter, RateLimitExceeded
+from omni_modal.security.redis_rate_limiter import select_rate_limiter
 from omni_modal.security.input_validation import (
     ValidationError, assert_body_size, assert_query_length, assert_tenant_id, assert_document_id_uuid,
     MAX_BODY_BYTES,
@@ -69,9 +73,9 @@ from omni_modal.saas.plans import PlanLimitExceeded
 
 
 class OmniModalHandler(BaseHTTPRequestHandler):
-    _query_cache = QueryCache(
-        enabled=os.environ.get("QUERY_CACHE_ENABLED", "true").lower() != "false"
-    )
+    # Redis-backed when REDIS_URL is set (shared across instances), else the
+    # in-process LRU+TTL cache. Same interface either way.
+    _query_cache = select_query_cache()
     # Try to get connection pool if DATABASE_URL is set
     try:
         _connection_pool = get_connection_pool() if os.environ.get("DATABASE_URL") else None
@@ -140,7 +144,7 @@ class OmniModalHandler(BaseHTTPRequestHandler):
     # Uses QLORA_ENTITY_MODEL_PATH to select backend (rule-based if unset).
     _entity_service = EntityExtractionService()
 
-    queue = AsyncIngestionQueue(
+    queue = select_ingestion_queue(
         _ingestion_pipeline,
         cache_evict_callback=_query_cache.evict_tenant,
         entity_service=_entity_service,
@@ -151,8 +155,12 @@ class OmniModalHandler(BaseHTTPRequestHandler):
         select_answer_synthesizer(),
     )
     _audit_sink = select_audit_sink()
-    _rate_limiter = SlidingWindowRateLimiter()
+    # Redis-backed when REDIS_URL is set (distributed), else in-process.
+    _rate_limiter = select_rate_limiter()
     _account_service = get_account_service()
+    # Access/refresh token lifecycle (rotation + revocation). Redis-backed when
+    # REDIS_URL is set, else in-process.
+    _session_service = select_session_service()
 
     # SaaS layer: orgs/workspaces, usage metering, notifications, billing (demo),
     # and optional adapters. Seeded with a demo org so the UI is never empty.
@@ -338,6 +346,12 @@ class OmniModalHandler(BaseHTTPRequestHandler):
                 return
             if self.path == "/auth/login":
                 self._handle_auth_login()
+                return
+            if self.path == "/auth/refresh":
+                self._handle_auth_refresh()
+                return
+            if self.path == "/auth/logout":
+                self._handle_auth_logout()
                 return
 
             # 1. Authentication
@@ -1043,20 +1057,43 @@ class OmniModalHandler(BaseHTTPRequestHandler):
         self._write_json(200, result)
 
     def _issue_login_token(self, account) -> dict:
-        """Sign a backend JWT for an authenticated account (7-day expiry)."""
-        exp = int(time.time()) + 7 * 24 * 3600
-        token = _make_jwt(
-            account.tenant_id, account.user_id, list(account.roles), exp,
-            jwt_secret_from_env(),
-        )
-        return {
-            "token": token,
-            "tenant_id": account.tenant_id,
-            "user_id": account.user_id,
-            "roles": list(account.roles),
-            "email": account.email,
-            "expires_at": exp,
-        }
+        """Issue an access + rotating refresh token pair for an account."""
+        return self._session_service.issue(account)
+
+    def _handle_auth_refresh(self) -> None:
+        """POST /auth/refresh — rotate a refresh token, return a new pair."""
+        try:
+            payload = self._read_json_body()
+        except json.JSONDecodeError:
+            self._write_json(400, {"error": "Invalid JSON body."})
+            return
+        refresh_token = str(payload.get("refresh_token", ""))
+        try:
+            result = self._session_service.refresh(refresh_token)
+        except RefreshTokenError as exc:
+            self._write_json(401, {"error": str(exc)})
+            return
+        except Exception as exc:
+            observability.capture_exception(exc, operation="auth.refresh")
+            self._write_json(500, {"error": "Token refresh failed."})
+            return
+        self._write_json(200, result)
+
+    def _handle_auth_logout(self) -> None:
+        """POST /auth/logout — revoke a refresh token (idempotent)."""
+        try:
+            payload = self._read_json_body()
+        except json.JSONDecodeError:
+            self._write_json(400, {"error": "Invalid JSON body."})
+            return
+        refresh_token = str(payload.get("refresh_token", ""))
+        try:
+            revoked = self._session_service.revoke(refresh_token)
+        except Exception as exc:
+            observability.capture_exception(exc, operation="auth.logout")
+            self._write_json(500, {"error": "Logout failed."})
+            return
+        self._write_json(200, {"revoked": revoked})
 
     def _handle_auth_register(self) -> None:
         """POST /auth/register — create an account, return a signed JWT."""

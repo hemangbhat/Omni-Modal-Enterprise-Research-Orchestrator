@@ -333,3 +333,54 @@ def serialize_ingestion_result(result: IngestionResult) -> dict[str, object]:
     if result.error_code is not None:
         payload["error_code"] = result.error_code.value
     return payload
+
+
+def deserialize_ingestion_result(payload: dict[str, object]) -> IngestionResult:
+    """Reconstruct an :class:`IngestionResult` from :func:`serialize_ingestion_result`.
+
+    Used by the Redis-backed durable queue so a job processed by a separate
+    worker process can be returned to the web tier with a fully-typed result.
+    """
+    from omni_modal.ingestion.models import (  # noqa: PLC0415
+        SourceReference,
+        StructuredChunk,
+    )
+
+    def _ref(data: dict[str, object]) -> SourceReference:
+        return SourceReference(
+            source_path=str(data.get("source_path", "")),
+            source_kind=data.get("source_kind"),  # type: ignore[arg-type]
+            page_number=data.get("page_number"),  # type: ignore[arg-type]
+            segment_index=data.get("segment_index"),  # type: ignore[arg-type]
+            start_ms=data.get("start_ms"),  # type: ignore[arg-type]
+            end_ms=data.get("end_ms"),  # type: ignore[arg-type]
+        )
+
+    chunks = [
+        StructuredChunk(
+            chunk_index=int(c["chunk_index"]),
+            content=str(c["content"]),
+            content_hash=str(c["content_hash"]),
+            source=_ref(dict(c.get("source") or {})),
+            start_word=int(c.get("start_word", 0)),
+            end_word=int(c.get("end_word", 0)),
+            metadata=dict(c.get("metadata") or {}),
+        )
+        for c in (payload.get("chunks") or [])  # type: ignore[union-attr]
+    ]
+
+    error_code_raw = payload.get("error_code")
+    error_code = IngestionErrorCode(error_code_raw) if error_code_raw else None
+
+    return IngestionResult(
+        tenant_id=str(payload["tenant_id"]),
+        document_id=str(payload["document_id"]),
+        owner_id=str(payload["owner_id"]),
+        title=str(payload["title"]),
+        source_kind=payload.get("source_kind"),  # type: ignore[arg-type]
+        status=payload.get("status"),  # type: ignore[arg-type]
+        chunks=chunks,
+        metadata=dict(payload.get("metadata") or {}),
+        error_code=error_code,
+        error_message=payload.get("error_message"),  # type: ignore[arg-type]
+    )

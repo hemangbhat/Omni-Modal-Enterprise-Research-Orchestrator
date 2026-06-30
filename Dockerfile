@@ -12,7 +12,7 @@ COPY services/api/src/ ./src/
 # Install only the essentials — no sentence-transformers on the free 512MB tier.
 # Embeddings fall back to the deterministic hashing provider (no RAM spike).
 # Groq (GROQ_API_KEY) provides grounded LLM answers from the retrieved chunks.
-RUN pip install --no-cache-dir -e ".[db,observability,api,saas]"
+RUN pip install --no-cache-dir -e ".[db,observability,api,saas,scale]"
 
 EXPOSE 8000
 

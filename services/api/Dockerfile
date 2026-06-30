@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml ./
 COPY src/ ./src/
 
-RUN pip install --no-cache-dir -e ".[db,observability,api,saas]"
+RUN pip install --no-cache-dir -e ".[db,observability,api,saas,scale]"
 
 # sentence-transformers (~400MB RAM) is NOT installed here — Render free tier
 # is 512MB and the model load OOMs. Use hashing embeddings on free tier.

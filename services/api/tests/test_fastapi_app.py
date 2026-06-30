@@ -58,6 +58,35 @@ class FastApiAppTests(unittest.TestCase):
         r = self.client.post("/auth/login", json={"email": "fa-bad@example.com", "password": "nope"})
         self.assertEqual(r.status_code, 401)
 
+    def test_refresh_and_logout_flow(self) -> None:
+        reg = self.client.post(
+            "/auth/register", json={"email": "fa-refresh@example.com", "password": "password123"}
+        )
+        self.assertEqual(reg.status_code, 201, reg.text)
+        body = reg.json()
+        refresh_token = body["refresh_token"]
+        self.assertTrue(refresh_token)
+
+        # Refresh rotates the token and returns a new valid access token.
+        r = self.client.post("/auth/refresh", json={"refresh_token": refresh_token})
+        self.assertEqual(r.status_code, 200, r.text)
+        rotated = r.json()
+        self.assertNotEqual(rotated["refresh_token"], refresh_token)
+        self.assertEqual(len(rotated["token"].split(".")), 3)
+
+        # Logout revokes the current (rotated) refresh token.
+        r_logout = self.client.post("/auth/logout", json={"refresh_token": rotated["refresh_token"]})
+        self.assertEqual(r_logout.status_code, 200)
+        self.assertTrue(r_logout.json()["revoked"])
+
+        # After logout the token no longer refreshes.
+        r_after = self.client.post("/auth/refresh", json={"refresh_token": rotated["refresh_token"]})
+        self.assertEqual(r_after.status_code, 401)
+
+        # The original (now-rotated) token is also rejected — reuse detection.
+        r_reuse = self.client.post("/auth/refresh", json={"refresh_token": refresh_token})
+        self.assertEqual(r_reuse.status_code, 401)
+
     def test_register_validation_error_422(self) -> None:
         # Password too short violates the Pydantic min_length=8 constraint.
         r = self.client.post("/auth/register", json={"email": "x@example.com", "password": "short"})

@@ -378,6 +378,24 @@ class SaasService:
                 self.change_plan(
                     tenant_id=org.tenant_id, user_id=org.owner_user_id, plan_id=plan_id
                 )
+        elif event_type == "invoice.payment_failed":
+            # Dunning: a recurring charge failed. Notify the org owner so they
+            # can update their card before Stripe's retries exhaust and the
+            # subscription is cancelled (handled by subscription.deleted above).
+            customer_id = obj.get("customer")
+            org = self.workspaces.get_org_by_stripe_customer(customer_id) if customer_id else None
+            if org is not None:
+                try:
+                    self.notifications.add(
+                        tenant_id=org.tenant_id,
+                        title="Payment failed",
+                        body="Your latest subscription payment failed. Please update your "
+                             "billing details to avoid losing access.",
+                        kind="warning",
+                        user_id=org.owner_user_id,
+                    )
+                except Exception:  # noqa: BLE001 - notification failure must not break the webhook
+                    pass
 
     # ── Demo seed ────────────────────────────────────────────────────────
     def seed_demo(self) -> None:

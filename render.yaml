@@ -71,3 +71,44 @@ services:
 
       - key: APP_BASE_URL
         sync: false  # your Vercel frontend URL, e.g. https://omero.vercel.app
+
+      # ── Scaling (Redis) ───────────────────────────────────────────────────
+      # Optional. When set, the rate limiter + query cache + ingestion queue
+      # become Redis-backed so the web tier is stateless and horizontally
+      # scalable. Free, no card: https://upstash.com (copy the rediss:// URL).
+      - key: REDIS_URL
+        sync: false
+      # Keep "true" for a single web service. Set "false" ONLY if you also run
+      # the omero-worker service below, so the web tier stops consuming jobs.
+      - key: INGEST_WORKER_IN_PROCESS
+        value: "true"
+
+  # ── Dedicated ingestion worker tier (optional) ───────────────────────────
+  # Enable this to run ingestion in a separate, independently-scalable process.
+  # When you enable it, set INGEST_WORKER_IN_PROCESS=false on omero-api above
+  # so the web tier stays stateless. Requires REDIS_URL + DATABASE_URL.
+  - type: worker
+    name: omero-worker
+    runtime: docker
+    dockerfilePath: ./services/api/Dockerfile
+    dockerContext: ./services/api
+    plan: free
+    region: oregon
+    dockerCommand: python -m omni_modal.ingestion.redis_worker
+    envVars:
+      - key: REDIS_URL
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+      - key: EMBEDDING_BACKEND
+        value: hashing
+      - key: EMBEDDING_DIMENSIONS
+        value: "384"
+      - key: SENTRY_DSN
+        sync: false
+      - key: ENVIRONMENT
+        value: production

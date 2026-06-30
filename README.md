@@ -423,9 +423,9 @@ Or connect the GitHub repo to Vercel for automatic deploys on push.
 ### Production considerations
 
 - Replace `InMemoryAuditSink` with a PostgreSQL-backed sink (the `audit_logs` table exists and is ready)
-- The in-process `SlidingWindowRateLimiter` and `QueryCache` are not shared across processes — use Redis for multi-worker deployments
-- JWT auth uses a shared secret — replace with a real IdP (Auth0, Okta, NextAuth) for production
-- The `BackgroundWorker` daemon thread should be replaced with Celery + Redis for horizontal scaling
+- The rate limiter, query cache, and ingestion queue are **Redis-backed when `REDIS_URL` is set** (shared across instances → stateless, horizontally-scalable web tier); they fall back to in-process implementations when it is unset
+- Auth uses **short-lived access tokens + rotating refresh tokens** with server-side revocation and reuse detection (`/auth/refresh`, `/auth/logout`); the refresh store is Redis-backed when `REDIS_URL` is set. Still on the roadmap: httpOnly-cookie storage (tokens are in `localStorage` today), social OAuth, email verification, and MFA
+- For a dedicated worker tier, run `python -m omni_modal.ingestion.redis_worker` as a separate process and set `INGEST_WORKER_IN_PROCESS=false` on the web service (see `render.yaml`)
 
 ---
 
@@ -438,8 +438,11 @@ The backend runs on **FastAPI** (`omni_modal.api`, run with `python -m omni_moda
 **Why Hypothesis property-based testing?**
 Unit tests catch known cases; property tests find unknown edge cases. The 34+ PBT tests cover correctness invariants: JWT round-trips, PII scrubbing completeness, rate limiter window boundaries, batch partitioning, cache eviction, etc.
 
-**Why in-process caching and queuing?**
-The design avoids external dependencies (no Redis, no Celery) to keep the deployment model simple and the architecture understandable. These components are injected via constructor, so swapping in Redis or a real message queue requires only a protocol-compatible class.
+**Why a Redis-backed rate limiter, cache, and queue (with in-process fallback)?**
+For horizontal scaling, the rate-limit counters, query cache, and ingestion queue must be shared state — otherwise every web instance has its own and the "scalable SaaS" claim breaks down. When `REDIS_URL` is set, all three move to Redis: a sliding-window limiter (sorted sets), a shared TTL cache, and a durable job queue with retries + dead-letter and a separable worker tier (`python -m omni_modal.ingestion.redis_worker`). Each component is injected via the constructor and degrades to its in-process implementation when Redis is absent or unreachable, so the offline/demo path keeps working with zero configuration. Tested end-to-end with `fakeredis` (no live server required).
+
+**Why short-lived access tokens + rotating refresh tokens?**
+A single long-lived JWT can't be revoked if it leaks. The auth flow issues a short-lived access token (default 15 min, `ACCESS_TOKEN_TTL_SECONDS`) plus a long-lived, server-stored refresh token (default 30 days). `/auth/refresh` rotates the refresh token on every use and invalidates the previous one; replaying a rotated token triggers **reuse detection** that revokes the whole token family (theft mitigation). `/auth/logout` revokes immediately. Only SHA-256 hashes of refresh tokens are stored, in Redis (shared + revocable across instances) when `REDIS_URL` is set, else in-process. The browser renews silently before expiry. Remaining hardening (httpOnly cookies, OAuth, email verification, MFA) is documented as roadmap, not claimed as done.
 
 **Why content redaction before A2A delegation?**
 Internal document chunks must never leave the tenant security boundary. The `Redactor` intercepts delegation payloads, truncates `internal_status` to 500 chars, replaces chunk fingerprints with `[REDACTED]`, and raises `ContentLeakError` if verbatim chunk content is detected in the question field.
@@ -469,8 +472,13 @@ Internal document chunks must never leave the tenant security boundary. The `Red
 - ConnectionPool singleton (`psycopg_pool`, double-checked locking)
 - QueryCache (LRU + TTL via `cachetools`, tenant eviction secondary index)
 - AsyncIngestionQueue with BackgroundWorker daemon thread and watchdog restart
+- **Horizontal scaling (Redis):** distributed sliding-window rate limiter, shared query cache, and a durable ingestion queue (retries + dead-letter) with a separable worker tier (`python -m omni_modal.ingestion.redis_worker`) — all behind factories that fall back to in-process when `REDIS_URL` is unset
+- **Auth lifecycle:** short-lived access JWTs + rotating refresh tokens with reuse detection and server-side revocation (`/auth/refresh`, `/auth/logout`); refresh store is Redis-backed when configured; frontend renews silently
+- **Observability:** Prometheus metrics at `/metrics`, readiness probe at `/health/ready`, structured JSON access logs, and end-to-end `X-Correlation-ID` propagation
+- **Data hardening:** idempotent migration runner (`scripts/migrate.py` + `schema_migrations`) and Postgres Row-Level Security policies (`0008_rls.sql`) for database-enforced tenant isolation
+- **Billing dunning:** `invoice.payment_failed` webhook notifies the org owner (in addition to checkout/subscription sync)
 - Benchmark harness (`python -m omni_modal.benchmark`, atomic JSON output)
-- 306+ tests: unit, integration, Hypothesis property-based, and 12 real frontend tests (Vitest)
+- 470+ backend tests: unit, integration, Hypothesis property-based; 26 frontend tests (Vitest). See also `docs/operations.md` for the production runbook.
 
 ### Not Implemented (Stubs / Interfaces Only) ⚠️
 
@@ -482,8 +490,8 @@ Internal document chunks must never leave the tenant security boundary. The `Red
 - **QLoRA entity extraction** — there is **no trained QLoRA model**. `ENTITY_NER_MODEL_PATH` (legacy alias `QLORA_ENTITY_MODEL_PATH`) loads a *pretrained* HF NER model (`dslim/bert-base-NER`); a QLoRA training pipeline is scaffolded but produces no fine-tuned weights. Rule-based extraction is the default.
 - **Live A2A / Gemini delegation** — `HttpA2AResearchClient` implements the JSON-RPC protocol correctly but requires a real endpoint URL. `DisabledExternalResearchClient` is used by default.
 - **Persistent audit log** — `PostgresAuditSink` writes all security/observability events to the `audit_events` table (migration `0007`, bigserial id, jsonb metadata). Wired into both the stdlib server and the FastAPI app via `select_audit_sink()`. Verified on Neon: tool calls, auth events, and system events persist and survive restart. The original Drizzle `audit_logs` table (compliance enum path) is kept for structured compliance exports.
-- **Frontend authentication UI** — `middleware.ts` is a pass-through; there is a `/sign-in` page that explains how to generate a dev token. JWT is enforced at the backend API level.
-- **Real session management** — JWT is enforced at the backend (HS256, constant-time, expiry checked). The frontend sends the `NEXT_PUBLIC_API_TOKEN` bearer token on every API call. Production would use cookie-based sessions (NextAuth etc.).
+- **Frontend authentication UI** — `middleware.ts` is a pass-through; there is a `/sign-in` + `/sign-up` page with real email+password auth. JWT is enforced at the backend API level.
+- **Session management** — implemented: short-lived access JWTs (default 15 min) + rotating refresh tokens with server-side revocation and reuse detection; the browser renews silently and revokes on sign-out. Tokens are stored in `localStorage` today — httpOnly-cookie storage, social OAuth, email verification, and MFA remain roadmap.
 - **Live database for most tests** — DB-dependent tests use mocks. Integration tests against a real pgvector instance require `DATABASE_URL` to be set.
 
 ---
@@ -498,6 +506,7 @@ Internal document chunks must never leave the tenant security boundary. The `Red
 | 10 | Enterprise Security | JWT, RBAC, document access control, rate limiting, redaction, 230 passing tests |
 | 11 | Performance & Scalability | Async ingestion, connection pool, query cache, batch writes, HNSW tuning, 275 passing tests |
 | 12 | Portfolio packaging | This README, resume bullets, interview script |
+| 13 | Production hardening | Redis-backed horizontal scaling (limiter/cache/durable queue + worker tier), access/refresh token lifecycle with revocation, Prometheus metrics + readiness + correlation IDs, migration runner + Postgres RLS, Stripe dunning. 472 backend tests. See `docs/operations.md` |
 
 ---
 

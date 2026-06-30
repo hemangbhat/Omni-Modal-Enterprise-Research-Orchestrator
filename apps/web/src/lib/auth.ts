@@ -9,6 +9,7 @@
  */
 
 const TOKEN_KEY = "omni_token";
+const REFRESH_KEY = "omni_refresh";
 
 export function getStoredToken(): string | null {
   if (typeof window === "undefined") return null;
@@ -32,6 +33,38 @@ export function clearStoredToken(): void {
   if (typeof window === "undefined") return;
   try {
     window.localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Refresh-token storage. The refresh token is long-lived and is exchanged at
+ * `/auth/refresh` for a fresh short-lived access token. Stored separately so
+ * sign-out can revoke it server-side.
+ */
+export function getStoredRefreshToken(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage.getItem(REFRESH_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setStoredRefreshToken(token: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(REFRESH_KEY, token);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function clearStoredRefreshToken(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(REFRESH_KEY);
   } catch {
     /* ignore */
   }

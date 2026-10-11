@@ -446,6 +446,10 @@ python scripts/migrate.py
 
 This matters for `0009_auth_recovery.sql` in particular: sign-in reads the `user_mfa` table on every login, so deploying the code without the table makes every sign-in fail. Nothing in `render.yaml` runs migrations automatically.
 
+The runner refuses to touch a database that has tables but no `schema_migrations` history, because replaying old files is not safe (`0004_embeddings_384.sql` truncates the embeddings table). To adopt such a database, check which files its schema already reflects and record them without executing them: `python scripts/migrate.py --baseline-through <last applied file>`.
+
+The project's Neon database was adopted this way on 2026-10-11 (0001 to 0007 recorded, 0008 and 0009 applied), so a plain `python scripts/migrate.py` is now safe there. Render does not redeploy on push for this service; use **Manual Deploy** in the Render dashboard after the migration has run.
+
 ### Production considerations
 
 - Audit events are written to Postgres (`audit_events`, migration `0007`) when `DATABASE_URL` is set; without a database they are kept in memory only
@@ -534,7 +538,8 @@ Audited on 2026-10-11 against the target product description. These are not buil
 - **Operations:** no view of failed ingestion jobs; the readiness probe does not check storage or the model provider; backup and recovery are not documented.
 - **Deployment:** the Render free tier runs the hashing embedder, which is not semantic, and cannot run Whisper, so audio transcription does not work there.
 - **Frontend:** no browser end-to-end test. `npm run lint` is broken (`next lint` was removed in Next.js 16).
-- **Migration 0009** and the Postgres-backed MFA and reset-token stores are covered by in-memory tests and by tests that check the SQL they send; they have not been run against a live database. `tests/test_auth_review_fixes.py` contains live tests that run when `DATABASE_URL` is exported.
+- **Fresh databases:** `0002_perf.sql` contains `ALTER DATABASE current_database() SET ...`, which does not look like valid SQL, and the live database was missing that file's covering index until it was added by hand on 2026-10-11. Building a new database from the migration files alone has not been tested and may stop at 0002.
+- **Docker image:** the image with the new dependency set has not been built locally; the first Render deploy is its first build.
 - **Lost authenticator:** there are no backup codes and no self-service recovery; password reset deliberately keeps two-step sign-in on. An operator has to remove the enrolment: `DELETE FROM user_mfa WHERE tenant_id = '<tenant>' AND user_id = '<user id>';`
 - **Account security limits:** `/auth/login` itself is not rate-limited (only the code step locks). TOTP secrets are stored unencrypted in `user_mfa`. Turning two-step sign-in on or off is not written to the audit log. Using one reset link does not cancel other unused links for the same address. With several API instances, two simultaneous requests could both accept the same code or challenge, because the check and the update are separate statements.
 - **Row-level security and `user_mfa`:** the policy copied from `0008_rls.sql` treats an unset tenant setting as "see everything". If the RLS flag is switched on with pooled connections, a connection whose setting was reset to an empty string would see no `user_mfa` rows and sign-in would skip the second step. Fix the policy (`NULLIF(current_setting(...), '') IS NULL`) before enabling that flag.

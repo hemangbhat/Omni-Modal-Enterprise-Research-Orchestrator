@@ -24,6 +24,8 @@ export default function ResetPasswordPage() {
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // True once the backend has rejected a submit, so we offer a fresh link.
+  const [linkRefused, setLinkRefused] = useState(false);
 
   useEffect(() => {
     setToken(new URLSearchParams(window.location.search).get("token"));
@@ -46,6 +48,8 @@ export default function ResetPasswordPage() {
       await resetPassword(token, password);
       setDone(true);
     } catch (err) {
+      // The backend refused the link itself (used, expired or unknown).
+      setLinkRefused(true);
       setError((err as Error).message);
     } finally {
       setSubmitting(false);
@@ -65,7 +69,8 @@ export default function ResetPasswordPage() {
       {done ? (
         <>
           <AuthMessage kind="success">
-            Your password has been changed and you have been signed out on every device.
+            Your password has been changed. Other devices signed in to this account will be asked
+            to sign in again within 15 minutes.
           </AuthMessage>
           <Link href="/sign-in" className={AUTH_SUBMIT_CLASS}>
             Sign in
@@ -105,7 +110,7 @@ export default function ResetPasswordPage() {
               {submitting ? "Saving…" : "Change password"}
             </button>
           </form>
-          {error ? (
+          {linkRefused ? (
             <p className="mt-lg text-center font-body-md text-[13px] text-on-surface-variant">
               {requestNewLink}
             </p>

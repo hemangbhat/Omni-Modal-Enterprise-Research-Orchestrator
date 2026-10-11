@@ -194,6 +194,14 @@ class SessionService:
         if session is None:
             raise RefreshTokenError("Invalid or expired refresh token.")
 
+        # Renew the per-user index entry, which would otherwise expire one
+        # refresh TTL after sign-in and leave a long-lived session out of
+        # reach of revoke_user().
+        self._kv.add_to_set(
+            self._user_key(session["tenant_id"], session["user_id"]),
+            session["family_id"], self._refresh_ttl,
+        )
+
         # Rotate: invalidate the presented token, then mint a successor.
         self._kv.put_json(_USED_PREFIX + h, {"family_id": session["family_id"]}, self._refresh_ttl)
         self._kv.delete(_SESS_PREFIX + h)

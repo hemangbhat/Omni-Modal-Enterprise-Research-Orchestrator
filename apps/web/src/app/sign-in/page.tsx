@@ -13,7 +13,7 @@ import { isMfaChallenge, login, mfaLogin, MfaCodeError, type AuthResult } from "
  *
  * Email + password via `POST /auth/login`. Accounts with two-step sign-in get
  * a second screen asking for their authenticator code (`POST /auth/mfa/login`).
- * The access token is stored in the browser session and sent on every API
+ * The access token is stored in the browser (localStorage) and sent on every API
  * call; signing out clears it.
  *
  * Development builds also offer sign-in with a raw JWT (the demo token from
@@ -98,7 +98,12 @@ export default function SignInPage() {
         setCode("");
         setError("That code was not accepted. Wait for a new code and try again.");
       } else if (err instanceof MfaCodeError) {
-        backToPassword("Too many attempts or the sign-in timed out. Sign in again.");
+        // 429: the second factor is locked; the backend says for how long.
+        backToPassword(
+          err.status === 429
+            ? err.message
+            : "Too many wrong codes, or the sign-in timed out. Sign in again."
+        );
       } else {
         setError((err as Error).message);
       }
@@ -146,11 +151,11 @@ export default function SignInPage() {
         <div className="premium-card rounded-2xl p-xl">
           <h2 className="mb-sm font-headline-md text-headline-md text-on-surface">Sign in</h2>
           <p className="mb-xl font-body-md text-body-md text-on-surface-variant">
-            Sign in with your email and password.
+            {mfaToken ? "One more step to finish signing in." : "Sign in with your email and password."}
           </p>
 
           {error ? (
-            <div className="mb-lg rounded-xl border border-error/30 bg-error-container/20 px-lg py-md font-body-md text-[14px] text-error">
+            <div role="alert" className="mb-lg rounded-xl border border-error/30 bg-error-container/20 px-lg py-md font-body-md text-[14px] text-error">
               {error}
             </div>
           ) : null}
@@ -205,6 +210,7 @@ export default function SignInPage() {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="you@company.com"
+                aria-label="Email"
                 autoComplete="email"
                 className="block w-full rounded-xl border border-outline-variant/30 bg-surface-container-lowest px-md py-sm font-body-md text-body-md text-on-surface placeholder:text-on-surface-variant/40 focus:border-primary-fixed-dim/50 focus:outline-none focus:ring-1 focus:ring-primary-fixed-dim/50"
               />
@@ -213,6 +219,7 @@ export default function SignInPage() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="Password"
+                aria-label="Password"
                 autoComplete="current-password"
                 className="block w-full rounded-xl border border-outline-variant/30 bg-surface-container-lowest px-md py-sm font-body-md text-body-md text-on-surface placeholder:text-on-surface-variant/40 focus:border-primary-fixed-dim/50 focus:outline-none focus:ring-1 focus:ring-primary-fixed-dim/50"
               />
@@ -327,7 +334,7 @@ export default function SignInPage() {
           <div className="mt-xl flex items-center justify-center gap-sm text-on-surface-variant">
             <MaterialIcon name="security" size={14} />
             <span className="font-mono-sm text-[11px]">
-              JWT HS256 · RBAC enforced · Tenant-isolated · Rate-limited
+              JWT HS256 · RBAC enforced · Tenant-isolated
             </span>
           </div>
         </div>

@@ -10,9 +10,16 @@ Flow:
   3. At login, if a user is enrolled, the password step returns an
      `mfa_required` challenge; `verify` completes the second factor.
 
+Guards:
+  * Each accepted code burns its time step, so a code cannot be replayed.
+  * `MAX_FAILED_CODES` wrong codes in a row lock the second factor for
+    `LOCKOUT_SECONDS`, across every login attempt, which bounds guessing by
+    someone who already has the password.
+  * An active second factor cannot be overwritten: it must be turned off
+    (which needs a current code) before a new one can be enrolled.
+
 The secret store is pluggable — Postgres (`user_mfa`) when `DATABASE_URL` is
-set, Redis when only `REDIS_URL` is set, else an in-process store. Each accepted
-code burns its time step, so a code cannot be replayed.
+set, Redis when only `REDIS_URL` is set, else an in-process store.
 """
 
 from __future__ import annotations
@@ -20,11 +27,27 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import math
 import os
 import struct
 import threading
 import time
 from urllib.parse import quote
+
+MAX_FAILED_CODES = 5
+LOCKOUT_SECONDS = 15 * 60
+
+
+class MfaAlreadyEnrolled(Exception):
+    """Raised when enrollment is started for a user whose MFA is already on."""
+
+
+class MfaLocked(Exception):
+    """Raised while the second factor is locked after too many wrong codes."""
+
+    def __init__(self, retry_after: int) -> None:
+        super().__init__(f"Too many wrong codes. Try again in {retry_after} seconds.")
+        self.retry_after = retry_after
 
 
 # ── TOTP primitives (RFC 6238 / RFC 4226) ──────────────────────────────────
@@ -61,9 +84,11 @@ def matching_counter(secret_b32: str, code: str, *, for_time: float | None = Non
     Callers that must reject replayed codes compare the result against the
     last counter they accepted.
     """
-    if not code or not code.strip().isdigit():
+    code = (code or "").strip()
+    # ASCII digits only: str.isdigit() alone also accepts other scripts'
+    # digits, which cannot match and would break the constant-time compare.
+    if len(code) != digits or not (code.isascii() and code.isdigit()):
         return None
-    code = code.strip()
     if for_time is None:
         for_time = time.time()
     counter = int(for_time // step)
@@ -92,6 +117,9 @@ def provisioning_uri(secret_b32: str, account_name: str, issuer: str = "OMERO") 
 
 
 # ── Secret store + service ──────────────────────────────────────────────────
+# A stored record is a dict with: secret, confirmed, last_counter (last accepted
+# time step), failed_attempts (consecutive wrong codes) and locked_until (epoch
+# seconds; 0 when not locked).
 class InMemoryMfaStore:
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -152,26 +180,34 @@ class PostgresMfaStore:
         tenant_id, user_id = self._split(key)
         with self._pool.connection() as conn, conn.cursor() as cur:
             cur.execute(
-                """SELECT secret, confirmed, last_counter FROM user_mfa
-                   WHERE tenant_id = %s AND user_id = %s""",
+                """SELECT secret, confirmed, last_counter, failed_attempts, locked_until
+                   FROM user_mfa WHERE tenant_id = %s AND user_id = %s""",
                 (tenant_id, user_id),
             )
             row = cur.fetchone()
         if not row:
             return None
-        return {"secret": row[0], "confirmed": bool(row[1]), "last_counter": int(row[2])}
+        return {
+            "secret": row[0], "confirmed": bool(row[1]), "last_counter": int(row[2]),
+            "failed_attempts": int(row[3]), "locked_until": float(row[4]),
+        }
 
     def put(self, key: str, record: dict) -> None:
         tenant_id, user_id = self._split(key)
         with self._pool.connection() as conn, conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO user_mfa (tenant_id, user_id, secret, confirmed, last_counter)
-                   VALUES (%s, %s, %s, %s, %s)
+                """INSERT INTO user_mfa
+                       (tenant_id, user_id, secret, confirmed, last_counter,
+                        failed_attempts, locked_until)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s)
                    ON CONFLICT (tenant_id, user_id) DO UPDATE
                    SET secret = EXCLUDED.secret, confirmed = EXCLUDED.confirmed,
-                       last_counter = EXCLUDED.last_counter, updated_at = now()""",
+                       last_counter = EXCLUDED.last_counter,
+                       failed_attempts = EXCLUDED.failed_attempts,
+                       locked_until = EXCLUDED.locked_until, updated_at = now()""",
                 (tenant_id, user_id, record["secret"], bool(record.get("confirmed")),
-                 int(record.get("last_counter", -1))),
+                 int(record.get("last_counter", -1)), int(record.get("failed_attempts", 0)),
+                 float(record.get("locked_until", 0))),
             )
 
     def delete(self, key: str) -> None:
@@ -194,11 +230,19 @@ class MfaService:
         return f"omero:mfa:{tenant_id}:{user_id}"
 
     def begin_enroll(self, tenant_id: str, user_id: str, account_name: str) -> dict:
-        """Create (or reset) a pending enrollment; returns secret + otpauth URI."""
+        """Create (or restart) a pending enrollment; returns secret + otpauth URI.
+
+        Raises :class:`MfaAlreadyEnrolled` when MFA is already on: replacing an
+        active second factor would switch it off without proof of possession.
+        """
+        existing = self._store.get(self._key(tenant_id, user_id))
+        if existing and existing.get("confirmed"):
+            raise MfaAlreadyEnrolled("Two-step sign-in is already on.")
         secret = generate_secret()
         self._store.put(
             self._key(tenant_id, user_id),
-            {"secret": secret, "confirmed": False, "last_counter": -1},
+            {"secret": secret, "confirmed": False, "last_counter": -1,
+             "failed_attempts": 0, "locked_until": 0},
         )
         return {"secret": secret, "otpauth_uri": provisioning_uri(secret, account_name)}
 
@@ -209,6 +253,8 @@ class MfaService:
         if counter is None or counter <= int(rec.get("last_counter", -1)):
             return False
         rec["last_counter"] = counter
+        rec["failed_attempts"] = 0
+        rec["locked_until"] = 0
         self._store.put(self._key(tenant_id, user_id), rec)
         return True
 
@@ -224,10 +270,27 @@ class MfaService:
         return bool(rec and rec.get("confirmed"))
 
     def verify(self, tenant_id: str, user_id: str, code: str) -> bool:
+        """Check a code for an enrolled user.
+
+        Raises :class:`MfaLocked` while the factor is locked. The wrong code
+        that reaches the limit returns False; the lock applies from the next
+        call, including to correct codes.
+        """
         rec = self._store.get(self._key(tenant_id, user_id))
         if not rec or not rec.get("confirmed"):
             return False
-        return self._accept(tenant_id, user_id, rec, code)
+        now = time.time()
+        locked_until = float(rec.get("locked_until", 0))
+        if locked_until > now:
+            raise MfaLocked(retry_after=max(1, math.ceil(locked_until - now)))
+        if self._accept(tenant_id, user_id, rec, code):
+            return True
+        rec["failed_attempts"] = int(rec.get("failed_attempts", 0)) + 1
+        if rec["failed_attempts"] >= MAX_FAILED_CODES:
+            rec["failed_attempts"] = 0
+            rec["locked_until"] = now + LOCKOUT_SECONDS
+        self._store.put(self._key(tenant_id, user_id), rec)
+        return False
 
     def disable(self, tenant_id: str, user_id: str, code: str) -> bool:
         """Remove MFA after verifying a current code (defense against hijack)."""
@@ -257,8 +320,14 @@ def select_mfa_service() -> MfaService:
             from omni_modal.db.pool import get_connection_pool  # noqa: PLC0415
 
             return MfaService(PostgresMfaStore(get_connection_pool()))
-        except Exception:  # noqa: BLE001 - fall through to a non-durable store
-            pass
+        except Exception as exc:  # noqa: BLE001 - fall through to a non-durable store
+            from omni_modal.observability import observability  # noqa: PLC0415
+
+            observability.capture_message(
+                f"DATABASE_URL is set but the MFA store could not use Postgres ({exc}); "
+                "two-step sign-in enrollment will NOT survive a restart.",
+                operation="security.mfa.select", level="error",
+            )
     from omni_modal.cache.redis_client import get_redis_client  # noqa: PLC0415
 
     client = get_redis_client()

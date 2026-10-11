@@ -168,8 +168,14 @@ def _select_store():
             from omni_modal.db.pool import get_connection_pool  # noqa: PLC0415
 
             return PostgresAccountStore(get_connection_pool())
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - fall back to the in-process store
+            from omni_modal.observability import observability  # noqa: PLC0415
+
+            observability.capture_message(
+                f"DATABASE_URL is set but the account store could not use Postgres ({exc}); "
+                "user accounts will NOT survive a restart.",
+                operation="security.accounts.select", level="error",
+            )
     return InMemoryAccountStore()
 
 

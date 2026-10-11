@@ -11,6 +11,7 @@ import os
 import re
 import time
 import unittest
+from unittest import mock
 
 import _path  # noqa: F401
 
@@ -200,7 +201,7 @@ class FastApiAppTests(unittest.TestCase):
         """
         token = self._register(email)
         auth = {"Authorization": f"Bearer {token}"}
-        r = self.client.post("/auth/mfa/enroll", headers=auth)
+        r = self._start_enrolment(token, email)
         self.assertEqual(r.status_code, 200, r.text)
         secret = r.json()["secret"]
         r = self.client.post(
@@ -210,6 +211,12 @@ class FastApiAppTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json(), {"enrolled": True})
         return secret
+
+    def _start_enrolment(self, token: str, email: str, password: str = "password123"):
+        return self.client.post(
+            "/auth/mfa/enroll", headers={"Authorization": f"Bearer {token}"},
+            json={"email": email, "password": password},
+        )
 
     def _login(self, email: str):
         return self.client.post("/auth/login", json={"email": email, "password": "password123"})
@@ -223,7 +230,7 @@ class FastApiAppTests(unittest.TestCase):
 
     def test_started_but_unconfirmed_enrolment_does_not_gate_login(self) -> None:
         token = self._register("fa-mfa-pending@example.com")
-        self.client.post("/auth/mfa/enroll", headers={"Authorization": f"Bearer {token}"})
+        self.assertEqual(self._start_enrolment(token, "fa-mfa-pending@example.com").status_code, 200)
         body = self._login("fa-mfa-pending@example.com").json()
         self.assertNotIn("mfa_required", body)
         self.assertIn("token", body)
@@ -310,14 +317,100 @@ class FastApiAppTests(unittest.TestCase):
         self.assertEqual(r.json(), {"enrolled": False})
         self.assertIn("token", self._login("fa-mfa-off@example.com").json())
 
-    def test_mfa_enrol_labels_the_authenticator_entry_with_the_given_name(self) -> None:
+    def test_mfa_enrol_labels_the_authenticator_entry_with_the_account_email(self) -> None:
         token = self._register("fa-mfa-label@example.com")
-        r = self.client.post(
-            "/auth/mfa/enroll", headers={"Authorization": f"Bearer {token}"},
-            json={"account_name": "fa-mfa-label@example.com"},
-        )
+        r = self._start_enrolment(token, "fa-mfa-label@example.com")
         self.assertEqual(r.status_code, 200, r.text)
         self.assertIn("OMERO%3Afa-mfa-label%40example.com", r.json()["otpauth_uri"])
+
+    # ── Review fixes: enrolment is guarded, wrong codes lock, codes are single-use ──
+    def test_mfa_enrol_requires_the_current_password(self) -> None:
+        token = self._register("fa-mfa-pw@example.com")
+        wrong = self._start_enrolment(token, "fa-mfa-pw@example.com", password="not-my-password")
+        self.assertEqual(wrong.status_code, 403)
+        missing = self.client.post("/auth/mfa/enroll", headers={"Authorization": f"Bearer {token}"})
+        self.assertEqual(missing.status_code, 422)
+
+    def test_mfa_enrol_rejects_another_accounts_credentials(self) -> None:
+        self._register("fa-mfa-other@example.com")
+        token = self._register("fa-mfa-mine@example.com")
+        r = self._start_enrolment(token, "fa-mfa-other@example.com")
+        self.assertEqual(r.status_code, 403)
+        auth = {"Authorization": f"Bearer {token}"}
+        self.assertEqual(self.client.get("/auth/mfa/status", headers=auth).json(), {"enrolled": False})
+
+    def test_mfa_enrol_cannot_replace_an_active_second_factor(self) -> None:
+        secret = self._enrol_mfa("fa-mfa-keep@example.com")
+        challenge = self._login("fa-mfa-keep@example.com").json()
+        session = self.client.post(
+            "/auth/mfa/login", json={"mfa_token": challenge["mfa_token"], "code": totp(secret)}
+        ).json()
+        again = self._start_enrolment(session["token"], "fa-mfa-keep@example.com")
+        self.assertEqual(again.status_code, 409)
+        auth = {"Authorization": f"Bearer {session['token']}"}
+        self.assertEqual(self.client.get("/auth/mfa/status", headers=auth).json(), {"enrolled": True})
+        # Password alone still does not sign in, and the original authenticator still works.
+        relogin = self._login("fa-mfa-keep@example.com").json()
+        self.assertIs(relogin.get("mfa_required"), True)
+        ok = self.client.post(
+            "/auth/mfa/login",
+            json={"mfa_token": relogin["mfa_token"], "code": totp(secret, for_time=time.time() + 30)},
+        )
+        self.assertEqual(ok.status_code, 200, ok.text)
+
+    def test_mfa_code_cannot_be_reused_on_a_second_login(self) -> None:
+        secret = self._enrol_mfa("fa-mfa-replay@example.com")
+        code = totp(secret)
+        first = self._login("fa-mfa-replay@example.com").json()
+        ok = self.client.post("/auth/mfa/login", json={"mfa_token": first["mfa_token"], "code": code})
+        self.assertEqual(ok.status_code, 200, ok.text)
+        second = self._login("fa-mfa-replay@example.com").json()
+        replay = self.client.post("/auth/mfa/login", json={"mfa_token": second["mfa_token"], "code": code})
+        self.assertEqual(replay.status_code, 401)
+
+    def test_mfa_wrong_codes_across_logins_lock_the_second_factor(self) -> None:
+        secret = self._enrol_mfa("fa-mfa-spray@example.com")
+        wrong = 0
+        while wrong < 5:
+            # A fresh login each time, so the per-challenge limit never applies.
+            mfa_token = self._login("fa-mfa-spray@example.com").json()["mfa_token"]
+            r = self.client.post("/auth/mfa/login", json={"mfa_token": mfa_token, "code": "000000"})
+            self.assertEqual(r.status_code, 401)
+            wrong += 1
+        mfa_token = self._login("fa-mfa-spray@example.com").json()["mfa_token"]
+        locked = self.client.post(
+            "/auth/mfa/login", json={"mfa_token": mfa_token, "code": totp(secret)}
+        )
+        self.assertEqual(locked.status_code, 429, locked.text)
+        self.assertIsNone(locked.json()["detail"]["mfa_token"])
+        self.assertIn("Too many wrong codes", locked.json()["detail"]["error"])
+        self.assertGreater(int(locked.headers["Retry-After"]), 0)
+
+    def test_mfa_wrong_codes_do_not_extend_the_challenge_lifetime(self) -> None:
+        secret = self._enrol_mfa("fa-mfa-ttl@example.com")
+        start = time.time()
+        mfa_token = self._login("fa-mfa-ttl@example.com").json()["mfa_token"]
+        with mock.patch("time.time", return_value=start + 200):
+            bad = self.client.post("/auth/mfa/login", json={"mfa_token": mfa_token, "code": "000000"})
+            self.assertEqual(bad.status_code, 401)
+            mfa_token = bad.json()["detail"]["mfa_token"]
+        # 310 s after the password step: past the 5-minute challenge window,
+        # even though a retry token was issued at 200 s.
+        with mock.patch("time.time", return_value=start + 310):
+            late = self.client.post(
+                "/auth/mfa/login",
+                json={"mfa_token": mfa_token, "code": totp(secret, for_time=start + 310)},
+            )
+        self.assertEqual(late.status_code, 401)
+
+    def test_mfa_malformed_code_is_rejected_without_a_server_error(self) -> None:
+        self._enrol_mfa("fa-mfa-unicode@example.com")
+        mfa_token = self._login("fa-mfa-unicode@example.com").json()["mfa_token"]
+        r = self.client.post(
+            "/auth/mfa/login", json={"mfa_token": mfa_token, "code": "\uff11\uff12\uff13\uff14\uff15\uff16"}
+        )
+        self.assertEqual(r.status_code, 401)
+        self.assertTrue(r.json()["detail"]["mfa_token"])  # the challenge survives a typo
 
     # ── Password reset ───────────────────────────────────────────────────
     def _sent_emails(self) -> list:

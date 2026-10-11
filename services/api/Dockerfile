@@ -11,7 +11,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml ./
 COPY src/ ./src/
 
-RUN pip install --no-cache-dir -e ".[db,observability,api,saas,scale]"
+# `performance` provides psycopg-pool: without it the account, SaaS, MFA and
+# password-reset stores cannot use Postgres and fall back to process memory.
+RUN pip install --no-cache-dir -e ".[db,performance,observability,api,saas,scale]"
 
 # sentence-transformers (~400MB RAM) is NOT installed here — Render free tier
 # is 512MB and the model load OOMs. Use hashing embeddings on free tier.

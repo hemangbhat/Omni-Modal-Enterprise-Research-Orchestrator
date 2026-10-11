@@ -2,6 +2,7 @@ import {
   bigint,
   boolean,
   customType,
+  doublePrecision,
   index,
   integer,
   jsonb,
@@ -247,7 +248,8 @@ export const auditLogs = pgTable(
 );
 
 // Durable TOTP enrollment (migration 0009). `lastCounter` is the last accepted
-// 30-second time step, so a code cannot be replayed inside its window.
+// 30-second time step, so a code cannot be replayed inside its window;
+// `failedAttempts` and `lockedUntil` (epoch seconds) drive the wrong-code lockout.
 export const userMfa = pgTable(
   "user_mfa",
   {
@@ -256,6 +258,8 @@ export const userMfa = pgTable(
     secret: text("secret").notNull(),
     confirmed: boolean("confirmed").notNull().default(false),
     lastCounter: bigint("last_counter", { mode: "number" }).notNull().default(-1),
+    failedAttempts: integer("failed_attempts").notNull().default(0),
+    lockedUntil: doublePrecision("locked_until").notNull().default(0),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
   },
   (table) => ({

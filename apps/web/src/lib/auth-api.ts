@@ -35,14 +35,17 @@ export function isMfaChallenge(result: AuthResult | MfaChallenge): result is Mfa
 /**
  * A rejected MFA login. `nextToken` is the challenge token to retry with, or
  * null when the challenge is over (expired, or too many wrong codes) and the
- * user must enter their password again.
+ * user must enter their password again. `status` is 401 for a wrong code or a
+ * dead challenge and 429 while the second factor is locked.
  */
 export class MfaCodeError extends Error {
   nextToken: string | null;
-  constructor(message: string, nextToken: string | null) {
+  status: number;
+  constructor(message: string, nextToken: string | null, status: number) {
     super(message);
     this.name = "MfaCodeError";
     this.nextToken = nextToken;
+    this.status = status;
   }
 }
 
@@ -91,8 +94,12 @@ export async function mfaLogin(mfaToken: string, code: string): Promise<AuthResu
   const data: unknown = await res.json().catch(() => ({}));
   if (!res.ok) {
     const { message, fields } = parseApiError(data);
+    const text = message ?? `Sign-in failed (HTTP ${res.status}).`;
+    // Only these two statuses are about the code; anything else is a failure
+    // of the request itself and must not be shown as "wrong code".
+    if (res.status !== 401 && res.status !== 429) throw new Error(text);
     const nextToken = typeof fields.mfa_token === "string" ? fields.mfa_token : null;
-    throw new MfaCodeError(message ?? `Sign-in failed (HTTP ${res.status}).`, nextToken);
+    throw new MfaCodeError(text, nextToken, res.status);
   }
   return data as AuthResult;
 }
@@ -101,9 +108,15 @@ export function mfaStatus(): Promise<{ enrolled: boolean }> {
   return call("/auth/mfa/status", undefined, { method: "GET", authenticated: true });
 }
 
-/** Start enrolment. `accountName` labels the entry in the authenticator app. */
-export function mfaEnroll(accountName?: string): Promise<{ secret: string; otpauth_uri: string }> {
-  return call("/auth/mfa/enroll", { account_name: accountName }, { authenticated: true });
+/**
+ * Start enrolment. The backend re-checks the account password, so a signed-in
+ * browser alone cannot attach a new authenticator.
+ */
+export function mfaEnroll(
+  email: string,
+  password: string
+): Promise<{ secret: string; otpauth_uri: string }> {
+  return call("/auth/mfa/enroll", { email, password }, { authenticated: true });
 }
 
 export async function mfaConfirm(code: string): Promise<void> {

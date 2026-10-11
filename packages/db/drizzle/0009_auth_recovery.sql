@@ -2,6 +2,8 @@
 --
 -- user_mfa: one TOTP secret per (tenant, user). `last_counter` is the last
 -- accepted 30-second time step, so a code cannot be replayed inside its window.
+-- `failed_attempts` counts consecutive wrong codes; `locked_until` (epoch
+-- seconds, 0 = not locked) holds the lockout that follows too many of them.
 --
 -- password_reset_tokens: single-use, expiring reset links. Only the SHA-256 of
 -- the token is stored; the raw token exists only in the email sent to the user.
@@ -12,6 +14,8 @@ CREATE TABLE IF NOT EXISTS user_mfa (
   secret text NOT NULL,
   confirmed boolean NOT NULL DEFAULT false,
   last_counter bigint NOT NULL DEFAULT -1,
+  failed_attempts integer NOT NULL DEFAULT 0,
+  locked_until double precision NOT NULL DEFAULT 0,
   updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (tenant_id, user_id)
 );

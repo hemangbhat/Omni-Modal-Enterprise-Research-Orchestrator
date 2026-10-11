@@ -11,7 +11,7 @@ A multi-tenant enterprise research platform that ingests PDF and audio documents
 - **Observability** — Sentry distributed tracing across frontend and backend, property-based tests for correctness
 - **Enterprise security** — JWT authentication, RBAC, document-level access control, PII scrubbing, rate limiting, content redaction before external delegation
 - **Performance** — async ingestion queue, connection pooling, query result caching, batch embedding writes
-- **Test quality** — 534 backend tests (unit, HTTP integration, Hypothesis property-based) and 72 frontend tests, all run in CI
+- **Test quality** — 562 backend tests (unit, HTTP integration, Hypothesis property-based) and 95 frontend tests (API clients and screen-level tests of the sign-in, two-step sign-in and password-reset screens); CI is configured to run both suites
 - **Works locally without a database** — a Postgres-free in-memory path wires ingestion → persistence → retrieval end-to-end so the demo runs out of the box (with a deterministic, non-semantic embedder)
 
 ---
@@ -62,7 +62,9 @@ DeterministicAgentGraph
 ├── packages/db/            # Drizzle schema + migrations
 │   └── drizzle/
 │       ├── 0001_initial.sql    # Schema: documents, document_chunks, embeddings, audit_logs
-│       └── 0002_perf.sql       # HNSW tuning (m=16, ef_construction=64, ef_search=40)
+│       ├── 0002_perf.sql       # HNSW tuning (m=16, ef_construction=64, ef_search=40)
+│       ├── 0003 … 0008         # SaaS tables, 384-dim embeddings, auth, notifications, audit events, RLS
+│       └── 0009_auth_recovery.sql  # Two-step sign-in (user_mfa) and password_reset_tokens
 ├── services/api/
 │   └── src/omni_modal/
 │       ├── benchmark/      # python -m omni_modal.benchmark
@@ -194,18 +196,19 @@ python -m omni_modal.main         # HTTP server at http://localhost:8000
 | Endpoint | What it does |
 |---|---|
 | `POST /auth/login` | Returns a session, or `{"mfa_required": true, "mfa_token": ...}` when the account has two-step sign-in |
-| `POST /auth/mfa/login` | Completes sign-in with the challenge token and a 6-digit code |
-| `POST /auth/mfa/enroll`, `/confirm`, `/disable`, `GET /auth/mfa/status` | Turn two-step sign-in on or off for the signed-in user |
+| `POST /auth/mfa/login` | Completes sign-in with the challenge token and a 6-digit code. Five wrong codes in a row, across any number of login attempts, lock the second step for 15 minutes (HTTP 429) |
+| `POST /auth/mfa/enroll` | Starts enrolment. Requires the account email and current password, and is refused with 409 while two-step sign-in is already on |
+| `POST /auth/mfa/confirm`, `/disable`, `GET /auth/mfa/status` | Confirm enrolment, turn it off (needs a current code), or read its state |
 | `POST /auth/password/forgot` | Emails a reset link. Same response whether or not the address is registered |
-| `POST /auth/password/reset` | Sets a new password from the link's token and signs the account out everywhere |
+| `POST /auth/password/reset` | Sets a new password from the link's token and revokes every refresh token of the account. Access tokens already issued keep working until they expire (15 minutes at most) |
 
 Reset links are built from `APP_BASE_URL`, so set it to the frontend's public address in deployment. Without `RESEND_API_KEY` the email is only logged by the console adapter.
 
 ### Tests
 
 ```bash
-# Backend unit, property-based and HTTP integration tests (534 tests).
-# The suite never reads your .env, so it cannot touch real services.
+# Backend unit, property-based and HTTP integration tests (562 tests).
+# The suite never reads your .env, so it does not use your real keys or database.
 cd services/api && python -m pytest tests
 
 # Frontend unit tests (Vitest — real assertions, not stubs)
@@ -431,9 +434,21 @@ The `apps/web/vercel.json` configures the Next.js frontend for Vercel deployment
 
 Or connect the GitHub repo to Vercel for automatic deploys on push.
 
+### Deploying a version with new migrations
+
+Apply migrations **before** the new code serves traffic:
+
+```bash
+# with DATABASE_URL pointing at the target database
+python scripts/migrate.py --dry-run   # lists what would be applied
+python scripts/migrate.py
+```
+
+This matters for `0009_auth_recovery.sql` in particular: sign-in reads the `user_mfa` table on every login, so deploying the code without the table makes every sign-in fail. Nothing in `render.yaml` runs migrations automatically.
+
 ### Production considerations
 
-- Replace `InMemoryAuditSink` with a PostgreSQL-backed sink (the `audit_logs` table exists and is ready)
+- Audit events are written to Postgres (`audit_events`, migration `0007`) when `DATABASE_URL` is set; without a database they are kept in memory only
 - The rate limiter, query cache, and ingestion queue are **Redis-backed when `REDIS_URL` is set** (shared across instances → stateless, horizontally-scalable web tier); they fall back to in-process implementations when it is unset
 - Auth uses **short-lived access tokens + rotating refresh tokens** with server-side revocation and reuse detection (`/auth/refresh`, `/auth/logout`), optional **two-step sign-in (TOTP)**, and **password reset by email**. The refresh store is Redis-backed when `REDIS_URL` is set; without Redis it is in-process, so a restart signs users out. Still on the roadmap: httpOnly-cookie storage (tokens are in `localStorage` today), social OAuth, and email verification
 - For a dedicated worker tier, run `python -m omni_modal.ingestion.redis_worker` as a separate process and set `INGEST_WORKER_IN_PROCESS=false` on the web service (see `render.yaml`)
@@ -444,7 +459,7 @@ Or connect the GitHub repo to Vercel for automatic deploys on push.
 
 **Backend HTTP layer — FastAPI (primary) with a stdlib fallback**
 
-The backend runs on **FastAPI** (`omni_modal.api`, run with `python -m omni_modal.api` or `uvicorn omni_modal.api:app`): async handlers, Pydantic request validation, a JWT auth dependency, RBAC, usage metering/plan gating, and auto-generated OpenAPI docs at `/docs` (28 routes). It covers the full surface — auth (register/login), query + SSE streaming, ingestion (upload/local/job-status), documents/projects/archives/entities, and the entire SaaS layer (workspaces, usage, billing incl. Stripe checkout/portal/webhook, members/invites, plans, admin, notifications) — and is covered by `TestClient` tests in `tests/test_fastapi_app.py`. The original stdlib `http.server` implementation (`omni_modal.main`) remains as a dependency-free reference that shares the same domain services; newer endpoints (two-step sign-in, password reset) exist only in the FastAPI app.
+The backend runs on **FastAPI** (`omni_modal.api`, run with `python -m omni_modal.api` or `uvicorn omni_modal.api:app`): async handlers, Pydantic request validation, a JWT auth dependency, RBAC, usage metering/plan gating, and auto-generated OpenAPI docs at `/docs` . It covers the full surface — auth (register/login), query + SSE streaming, ingestion (upload/local/job-status), documents/projects/archives/entities, and the entire SaaS layer (workspaces, usage, billing incl. Stripe checkout/portal/webhook, members/invites, plans, admin, notifications) — and is covered by `TestClient` tests in `tests/test_fastapi_app.py`. The original stdlib `http.server` implementation (`omni_modal.main`) remains as a dependency-free reference that shares the same domain services; newer endpoints (two-step sign-in, password reset) exist only in the FastAPI app.
 
 **Why Hypothesis property-based testing?**
 Unit tests catch known cases; property tests find unknown edge cases. The 34+ PBT tests cover correctness invariants: JWT round-trips, PII scrubbing completeness, rate limiter window boundaries, batch partitioning, cache eviction, etc.
@@ -487,10 +502,10 @@ Internal document chunks must never leave the tenant security boundary. The `Red
 - **Auth lifecycle:** short-lived access JWTs + rotating refresh tokens with reuse detection and server-side revocation (`/auth/refresh`, `/auth/logout`); refresh store is Redis-backed when configured; frontend renews silently
 - **Observability:** Prometheus metrics at `/metrics`, readiness probe at `/health/ready`, structured JSON access logs, and end-to-end `X-Correlation-ID` propagation
 - **Data hardening:** idempotent migration runner (`scripts/migrate.py` + `schema_migrations`) and Postgres Row-Level Security policies (`0008_rls.sql`) for database-enforced tenant isolation
-- **Account security:** two-step sign-in with any authenticator app (RFC 6238 TOTP; codes are single-use and five wrong codes end the login attempt) and password reset by emailed link (single-use, 30-minute expiry, stored hashed, capped at 3 per address per hour, revokes every session). Both persist in Postgres (`0009_auth_recovery.sql`) when `DATABASE_URL` is set
+- **Account security:** two-step sign-in with any authenticator app (RFC 6238 TOTP). Codes are single-use; five wrong codes lock the second step for 15 minutes; turning it on re-checks the password and an active authenticator cannot be replaced without turning it off first. Password reset by emailed link: single-use, 30-minute expiry, stored hashed, capped at 3 per address per hour, revokes every refresh token. Both persist in Postgres (`0009_auth_recovery.sql`) when `DATABASE_URL` is set and `psycopg-pool` is installed (the Docker images install it); if the database is configured but unusable, the fallback to memory is reported to Sentry and the log rather than happening silently
 - **Billing dunning:** `invoice.payment_failed` webhook notifies the org owner (in addition to checkout/subscription sync)
 - Benchmark harness (`python -m omni_modal.benchmark`, atomic JSON output)
-- 534 backend tests (unit, HTTP integration, Hypothesis property-based) and 72 frontend tests (Vitest). See also `docs/operations.md` for the production runbook.
+- 562 backend tests (unit, HTTP integration, Hypothesis property-based) and 95 frontend tests (Vitest + Testing Library). See also `docs/operations.md` for the production runbook.
 
 ### Not Implemented (Stubs / Interfaces Only) ⚠️
 
@@ -519,7 +534,12 @@ Audited on 2026-10-11 against the target product description. These are not buil
 - **Operations:** no view of failed ingestion jobs; the readiness probe does not check storage or the model provider; backup and recovery are not documented.
 - **Deployment:** the Render free tier runs the hashing embedder, which is not semantic, and cannot run Whisper, so audio transcription does not work there.
 - **Frontend:** no browser end-to-end test. `npm run lint` is broken (`next lint` was removed in Next.js 16).
-- **Migration 0009** and the Postgres-backed MFA and reset-token stores are covered by in-memory tests only; they have not been run against a live database.
+- **Migration 0009** and the Postgres-backed MFA and reset-token stores are covered by in-memory tests and by tests that check the SQL they send; they have not been run against a live database. `tests/test_auth_review_fixes.py` contains live tests that run when `DATABASE_URL` is exported.
+- **Lost authenticator:** there are no backup codes and no self-service recovery; password reset deliberately keeps two-step sign-in on. An operator has to remove the enrolment: `DELETE FROM user_mfa WHERE tenant_id = '<tenant>' AND user_id = '<user id>';`
+- **Account security limits:** `/auth/login` itself is not rate-limited (only the code step locks). TOTP secrets are stored unencrypted in `user_mfa`. Turning two-step sign-in on or off is not written to the audit log. Using one reset link does not cancel other unused links for the same address. With several API instances, two simultaneous requests could both accept the same code or challenge, because the check and the update are separate statements.
+- **Row-level security and `user_mfa`:** the policy copied from `0008_rls.sql` treats an unset tenant setting as "see everything". If the RLS flag is switched on with pooled connections, a connection whose setting was reset to an empty string would see no `user_mfa` rows and sign-in would skip the second step. Fix the policy (`NULLIF(current_setting(...), '') IS NULL`) before enabling that flag.
+- **Tests and the network:** one existing test sets a fake Sentry DSN, so the suite attempts a harmless outbound connection at exit.
+- **CI:** the workflow now installs the `api` extra and runs pytest, but that configuration has not yet had a run on GitHub.
 
 ---
 

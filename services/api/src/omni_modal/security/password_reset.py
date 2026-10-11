@@ -142,6 +142,12 @@ def select_password_reset_service() -> PasswordResetService:
             from omni_modal.db.pool import get_connection_pool  # noqa: PLC0415
 
             return PasswordResetService(PostgresResetStore(get_connection_pool()))
-        except Exception:  # noqa: BLE001 - fall back to the in-process store
-            pass
+        except Exception as exc:  # noqa: BLE001 - fall back to the in-process store
+            from omni_modal.observability import observability  # noqa: PLC0415
+
+            observability.capture_message(
+                f"DATABASE_URL is set but the password-reset store could not use Postgres ({exc}); "
+                "reset links will NOT survive a restart.",
+                operation="security.password_reset.select", level="error",
+            )
     return PasswordResetService(_shared_store())

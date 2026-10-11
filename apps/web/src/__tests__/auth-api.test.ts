@@ -107,14 +107,37 @@ describe("auth-api client", () => {
     expect((err as InstanceType<typeof MfaCodeError>).nextToken).toBeNull();
   });
 
-  it("mfaEnroll sends the bearer token and the account label", async () => {
+  it("mfaLogin carries the HTTP status so a lockout can be told from a wrong code", async () => {
+    next = () =>
+      jsonResponse(
+        { detail: { error: "Too many wrong codes. Try again in about 15 minutes.", mfa_token: null } },
+        429
+      );
+    const { mfaLogin, MfaCodeError } = await import("@/lib/auth-api");
+    const err = await mfaLogin("nonce-1", "000000").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MfaCodeError);
+    expect((err as InstanceType<typeof MfaCodeError>).status).toBe(429);
+    expect((err as InstanceType<typeof MfaCodeError>).message).toBe(
+      "Too many wrong codes. Try again in about 15 minutes."
+    );
+  });
+
+  it("mfaLogin does not report a server failure as a rejected code", async () => {
+    next = () => jsonResponse({ detail: "Internal Server Error" }, 500);
+    const { mfaLogin, MfaCodeError } = await import("@/lib/auth-api");
+    const err = await mfaLogin("nonce-1", "123456").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(MfaCodeError);
+  });
+
+  it("mfaEnroll sends the bearer token with the email and current password", async () => {
     window.localStorage.setItem("omni_token", "session.jwt.token");
     next = () => jsonResponse({ secret: "ABC", otpauth_uri: "otpauth://totp/x" });
     const { mfaEnroll } = await import("@/lib/auth-api");
-    const result = await mfaEnroll("user@example.com");
+    const result = await mfaEnroll("user@example.com", "password123");
     expect(lastUrl).toContain("/auth/mfa/enroll");
     expect(new Headers(lastInit?.headers).get("Authorization")).toBe("Bearer session.jwt.token");
-    expect(sentBody()).toEqual({ account_name: "user@example.com" });
+    expect(sentBody()).toEqual({ email: "user@example.com", password: "password123" });
     expect(result).toEqual({ secret: "ABC", otpauth_uri: "otpauth://totp/x" });
   });
 

@@ -8,6 +8,7 @@ JWT auth dependency, RBAC, and OpenAPI generation deterministically.
 from __future__ import annotations
 
 import os
+import re
 import time
 import unittest
 
@@ -21,6 +22,7 @@ os.environ.pop("GEMINI_API_KEY", None)
 from fastapi.testclient import TestClient  # noqa: E402
 
 from omni_modal.api.app import create_app  # noqa: E402
+from omni_modal.api.app import state as app_state  # noqa: E402
 from omni_modal.security.mfa import totp  # noqa: E402
 
 
@@ -286,6 +288,98 @@ class FastApiAppTests(unittest.TestCase):
         )
         self.assertEqual(r.status_code, 200, r.text)
         self.assertIn("OMERO%3Afa-mfa-label%40example.com", r.json()["otpauth_uri"])
+
+    # ── Password reset ───────────────────────────────────────────────────
+    def _sent_emails(self) -> list:
+        return app_state.saas.email.sent
+
+    def _request_reset(self, email: str) -> str:
+        """Ask for a reset link and return the token from the email sent."""
+        before = len(self._sent_emails())
+        r = self.client.post("/auth/password/forgot", json={"email": email})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json(), {"sent": True})
+        self.assertEqual(len(self._sent_emails()), before + 1)
+        message = self._sent_emails()[-1]
+        self.assertEqual(message.to, email)
+        self.assertEqual(message.subject, "Reset your OMERO password")
+        match = re.search(r"/reset-password\?token=([A-Za-z0-9_\-]+)", message.body)
+        self.assertIsNotNone(match, message.body)
+        return match.group(1)
+
+    def test_forgot_unknown_email_returns_sent_and_sends_nothing(self) -> None:
+        before = len(self._sent_emails())
+        r = self.client.post("/auth/password/forgot", json={"email": "nobody-here@example.com"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json(), {"sent": True})
+        self.assertEqual(len(self._sent_emails()), before)
+
+    def test_forgot_then_reset_changes_password(self) -> None:
+        self._register("fa-reset@example.com")
+        token = self._request_reset("fa-reset@example.com")
+        self.assertIn("expires in 30 minutes", self._sent_emails()[-1].body)
+        r = self.client.post("/auth/password/reset", json={"token": token, "password": "brand-new-pass"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json(), {"reset": True})
+        self.assertEqual(self._login("fa-reset@example.com").status_code, 401)
+        ok = self.client.post(
+            "/auth/login", json={"email": "fa-reset@example.com", "password": "brand-new-pass"}
+        )
+        self.assertEqual(ok.status_code, 200, ok.text)
+
+    def test_reset_link_cannot_be_reused(self) -> None:
+        self._register("fa-reset-once@example.com")
+        token = self._request_reset("fa-reset-once@example.com")
+        first = self.client.post("/auth/password/reset", json={"token": token, "password": "first-new-pass"})
+        self.assertEqual(first.status_code, 200, first.text)
+        again = self.client.post("/auth/password/reset", json={"token": token, "password": "second-new-pass"})
+        self.assertEqual(again.status_code, 400)
+        self.assertEqual(again.json()["detail"], "This reset link is invalid or has expired.")
+        still = self.client.post(
+            "/auth/login", json={"email": "fa-reset-once@example.com", "password": "first-new-pass"}
+        )
+        self.assertEqual(still.status_code, 200)
+
+    def test_reset_with_unknown_token_is_refused(self) -> None:
+        r = self.client.post("/auth/password/reset", json={"token": "made-up", "password": "whatever-pass"})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.json()["detail"], "This reset link is invalid or has expired.")
+
+    def test_reset_revokes_existing_refresh_tokens(self) -> None:
+        reg = self.client.post(
+            "/auth/register", json={"email": "fa-reset-revoke@example.com", "password": "password123"}
+        ).json()
+        token = self._request_reset("fa-reset-revoke@example.com")
+        self.client.post("/auth/password/reset", json={"token": token, "password": "brand-new-pass"})
+        r = self.client.post("/auth/refresh", json={"refresh_token": reg["refresh_token"]})
+        self.assertEqual(r.status_code, 401)
+
+    def test_reset_rejects_short_password_without_spending_the_link(self) -> None:
+        self._register("fa-reset-short@example.com")
+        token = self._request_reset("fa-reset-short@example.com")
+        short = self.client.post("/auth/password/reset", json={"token": token, "password": "short"})
+        self.assertEqual(short.status_code, 400)
+        self.assertEqual(short.json()["detail"], "Password must be at least 8 characters.")
+        ok = self.client.post("/auth/password/reset", json={"token": token, "password": "long-enough-pass"})
+        self.assertEqual(ok.status_code, 200, ok.text)
+
+    def test_forgot_is_capped_per_address(self) -> None:
+        self._register("fa-reset-cap@example.com")
+        for _ in range(3):
+            self._request_reset("fa-reset-cap@example.com")
+        before = len(self._sent_emails())
+        r = self.client.post("/auth/password/forgot", json={"email": "fa-reset-cap@example.com"})
+        self.assertEqual(r.json(), {"sent": True})
+        self.assertEqual(len(self._sent_emails()), before)
+
+    def test_reset_keeps_mfa_in_force(self) -> None:
+        self._enrol_mfa("fa-reset-mfa@example.com")
+        token = self._request_reset("fa-reset-mfa@example.com")
+        self.client.post("/auth/password/reset", json={"token": token, "password": "brand-new-pass"})
+        body = self.client.post(
+            "/auth/login", json={"email": "fa-reset-mfa@example.com", "password": "brand-new-pass"}
+        ).json()
+        self.assertIs(body.get("mfa_required"), True)
 
     def test_mfa_endpoints_require_bearer(self) -> None:
         self.assertEqual(self.client.post("/auth/mfa/enroll").status_code, 401)

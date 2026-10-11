@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -93,6 +93,18 @@ class MfaLoginRequest(BaseModel):
     code: str
 
 
+class ForgotPasswordRequest(BaseModel):
+    email: str = Field(..., max_length=320)
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(..., max_length=512)
+    password: str = Field(..., max_length=1024)
+
+
+INVALID_RESET_LINK = "This reset link is invalid or has expired."
+
+
 class MfaEnrollRequest(BaseModel):
     # Label shown in the authenticator app (the account email). Display only.
     account_name: str | None = Field(None, max_length=320)
@@ -160,6 +172,7 @@ class _State:
     query_cache: Any = None
     sessions: Any = None
     mfa: Any = None
+    password_resets: Any = None
 
 
 state = _State()
@@ -218,6 +231,9 @@ def _build_runtime() -> None:
     from omni_modal.security.mfa import select_mfa_service  # noqa: PLC0415
 
     state.mfa = select_mfa_service()
+    from omni_modal.security.password_reset import select_password_reset_service  # noqa: PLC0415
+
+    state.password_resets = select_password_reset_service()
     from omni_modal.security.pg_audit_sink import select_audit_sink  # noqa: PLC0415
 
     state.audit_sink = select_audit_sink()
@@ -446,6 +462,65 @@ def create_app() -> FastAPI:
         if not state.mfa.disable(claims.tenant_id, claims.user_id, body.code):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid code; MFA not disabled.")
         return {"enrolled": False}
+
+    # ── Password reset ───────────────────────────────────────────────────
+    def _audit(action: str, outcome: str, metadata: dict) -> None:
+        """Record a security event. Auditing must never break the request."""
+        try:
+            if state.audit_sink is not None:
+                state.audit_sink.record_event(None, action, "account", None, outcome, metadata)
+        except Exception as exc:  # noqa: BLE001
+            observability.capture_exception(exc, operation="api.audit")
+
+    def _send_reset_email(to: str, token: str) -> None:
+        base = os.environ.get("APP_BASE_URL", "http://localhost:3000").rstrip("/")
+        link = f"{base}/reset-password?token={token}"
+        try:
+            state.saas.email.send(
+                to=to,
+                subject="Reset your OMERO password",
+                body=(
+                    "Someone asked to reset the password for this OMERO account. "
+                    f'Choose a new password here: <a href="{link}">{link}</a>. '
+                    "This link works once and expires in 30 minutes. "
+                    "If you did not ask for this, you can ignore this email."
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            observability.capture_exception(exc, operation="api.password_reset_email")
+
+    @app.post("/auth/password/forgot", tags=["auth"])
+    async def forgot_password(body: ForgotPasswordRequest, background: BackgroundTasks) -> dict:
+        # The response is identical whether or not the address has an account,
+        # and the email goes out after the response, so neither the body nor
+        # the timing reveals which addresses are registered.
+        account = state.accounts.find_account(body.email)
+        if account is not None:
+            token = state.password_resets.issue(account.email)
+            if token is not None:
+                background.add_task(_send_reset_email, account.email, token)
+            _audit(
+                "password_reset_requested", "sent" if token else "rate_limited",
+                {"tenant_id": account.tenant_id, "user_id": account.user_id},
+            )
+        return {"sent": True}
+
+    @app.post("/auth/password/reset", tags=["auth"])
+    async def reset_password(body: ResetPasswordRequest) -> dict:
+        # Validate the new password before spending the single-use link.
+        if len(body.password) < 8:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Password must be at least 8 characters.")
+        email = state.password_resets.consume(body.token)
+        account = state.accounts.set_password(email, body.password) if email else None
+        if account is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, INVALID_RESET_LINK)
+        # Sign the account out everywhere: whoever held the old password is out.
+        revoked = state.sessions.revoke_user(account.tenant_id, account.user_id)
+        _audit(
+            "password_reset_completed", "ok",
+            {"tenant_id": account.tenant_id, "user_id": account.user_id, "sessions_revoked": revoked},
+        )
+        return {"reset": True}
 
     # ── Query ────────────────────────────────────────────────────────────
     @app.post("/query", tags=["research"])

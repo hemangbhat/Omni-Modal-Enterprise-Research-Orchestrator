@@ -56,6 +56,14 @@ class InMemoryAccountStore:
             row = self._by_email.get(email.lower())
             return dict(row) if row else None
 
+    def update_password(self, email: str, password_hash: str) -> bool:
+        with self._lock:
+            row = self._by_email.get(email.lower())
+            if row is None:
+                return False
+            row["password_hash"] = password_hash
+            return True
+
 
 class PostgresAccountStore:
     def __init__(self, pool) -> None:
@@ -95,6 +103,15 @@ class PostgresAccountStore:
             "role": row[3], "password_hash": row[4],
         }
 
+    def update_password(self, email: str, password_hash: str) -> bool:
+        with self._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """UPDATE users SET password_hash = %s
+                   WHERE lower(email) = lower(%s) AND password_hash IS NOT NULL""",
+                (password_hash, email),
+            )
+            return cur.rowcount > 0
+
 
 class AccountService:
     def __init__(self, store=None) -> None:
@@ -120,10 +137,29 @@ class AccountService:
         row = self._store.find((email or "").strip())
         if not row or not verify_password(password, row.get("password_hash") or ""):
             return None
-        return Account(
-            tenant_id=row["tenant_id"], user_id=row["user_id"],
-            email=row["email"], roles=_roles_for(row.get("role", "researcher")),
-        )
+        return _account_from_row(row)
+
+    def find_account(self, email: str) -> Account | None:
+        """Look up an account by email without checking a credential."""
+        row = self._store.find((email or "").strip())
+        return _account_from_row(row) if row else None
+
+    def set_password(self, email: str, new_password: str) -> Account | None:
+        """Replace an account's password (password reset). Returns the account,
+        or None when no credential account exists for the address."""
+        if len(new_password or "") < 8:
+            raise AccountError("Password must be at least 8 characters.")
+        email = (email or "").strip()
+        if not self._store.update_password(email, hash_password(new_password)):
+            return None
+        return self.find_account(email)
+
+
+def _account_from_row(row: dict) -> Account:
+    return Account(
+        tenant_id=row["tenant_id"], user_id=row["user_id"],
+        email=row["email"], roles=_roles_for(row.get("role", "researcher")),
+    )
 
 
 def _select_store():

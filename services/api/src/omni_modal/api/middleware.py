@@ -76,3 +76,23 @@ def install_observability(app: FastAPI) -> None:
                     }
                 )
             )
+
+
+# Security headers applied to every response (defense-in-depth hardening).
+_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
+    # HSTS is only honoured over HTTPS; harmless over http and correct in prod.
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+}
+
+
+def install_security_headers(app: FastAPI) -> None:
+    @app.middleware("http")
+    async def _security_headers(request: Request, call_next):
+        response = await call_next(request)
+        for header, value in _SECURITY_HEADERS.items():
+            response.headers.setdefault(header, value)
+        return response

@@ -84,6 +84,25 @@ class LogoutRequest(BaseModel):
     refresh_token: str
 
 
+class MfaConfirmRequest(BaseModel):
+    code: str
+
+
+class MfaLoginRequest(BaseModel):
+    mfa_token: str
+    code: str
+
+
+class MfaEnrollRequest(BaseModel):
+    # Label shown in the authenticator app (the account email). Display only.
+    account_name: str | None = Field(None, max_length=320)
+
+
+# Wrong codes allowed per MFA login challenge before the password step must
+# be repeated. Bounds online guessing of the 6-digit code.
+MFA_MAX_ATTEMPTS = 5
+
+
 class QueryRequestModel(BaseModel):
     question: str = Field(..., min_length=1, max_length=4000)
     top_k: int = Field(5, ge=1, le=50)
@@ -140,6 +159,7 @@ class _State:
     rate_limiter: Any = None
     query_cache: Any = None
     sessions: Any = None
+    mfa: Any = None
 
 
 state = _State()
@@ -195,6 +215,9 @@ def _build_runtime() -> None:
     from omni_modal.security.sessions import select_session_service  # noqa: PLC0415
 
     state.sessions = select_session_service()
+    from omni_modal.security.mfa import select_mfa_service  # noqa: PLC0415
+
+    state.mfa = select_mfa_service()
     from omni_modal.security.pg_audit_sink import select_audit_sink  # noqa: PLC0415
 
     state.audit_sink = select_audit_sink()
@@ -221,9 +244,10 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    from omni_modal.api.middleware import install_observability  # noqa: PLC0415
+    from omni_modal.api.middleware import install_observability, install_security_headers  # noqa: PLC0415
 
     install_observability(app)
+    install_security_headers(app)
 
     # ── Auth dependency ──────────────────────────────────────────────────
     def current_claims(authorization: str | None = Header(default=None)) -> JwtClaims:
@@ -355,12 +379,73 @@ def create_app() -> FastAPI:
     async def logout(body: LogoutRequest) -> dict:
         return {"revoked": state.sessions.revoke(body.refresh_token)}
 
-    @app.post("/auth/login", response_model=AuthResponse, tags=["auth"])
-    async def login(body: LoginRequest) -> AuthResponse:
+    @app.post("/auth/login", response_model=None, tags=["auth"])
+    async def login(body: LoginRequest):
         account = state.accounts.authenticate(email=body.email, password=body.password)
         if account is None:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password.")
-        return _issue(account)
+        # Step-up: if the account has MFA, require the second factor before
+        # issuing tokens. We stash the authenticated identity behind a one-time
+        # nonce so /auth/mfa/login can complete the session after code check.
+        if state.mfa.is_enrolled(account.tenant_id, account.user_id):
+            nonce = state.sessions.stash(
+                {
+                    "tenant_id": account.tenant_id,
+                    "user_id": account.user_id,
+                    "email": account.email,
+                    "roles": list(account.roles),
+                },
+                ttl=300,
+            )
+            return {"mfa_required": True, "mfa_token": nonce}
+        return state.sessions.issue(account)
+
+    @app.post("/auth/mfa/login", response_model=AuthResponse, tags=["auth"])
+    async def mfa_login(body: MfaLoginRequest) -> AuthResponse:
+        pending = state.sessions.unstash(body.mfa_token)
+        if pending is None:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "MFA challenge expired or invalid.")
+        if not state.mfa.verify(pending["tenant_id"], pending["user_id"], body.code):
+            # Re-stash so the user can retry with a fresh code — bounded by TTL
+            # and by MFA_MAX_ATTEMPTS, after which the challenge is dropped.
+            attempts = int(pending.get("attempts", 0)) + 1
+            new_nonce = None
+            if attempts < MFA_MAX_ATTEMPTS:
+                new_nonce = state.sessions.stash({**pending, "attempts": attempts}, ttl=300)
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED,
+                detail={"error": "Invalid MFA code.", "mfa_token": new_nonce},
+            )
+        from types import SimpleNamespace  # noqa: PLC0415
+
+        account = SimpleNamespace(
+            tenant_id=pending["tenant_id"], user_id=pending["user_id"],
+            email=pending.get("email", ""), roles=tuple(pending.get("roles", [])),
+        )
+        return AuthResponse(**state.sessions.issue(account))
+
+    @app.post("/auth/mfa/enroll", tags=["auth"])
+    async def mfa_enroll(
+        body: MfaEnrollRequest | None = None, claims: JwtClaims = Depends(current_claims)
+    ) -> dict:
+        label = (body.account_name if body else None) or claims.user_id
+        return state.mfa.begin_enroll(claims.tenant_id, claims.user_id, label)
+
+    @app.post("/auth/mfa/confirm", tags=["auth"])
+    async def mfa_confirm(body: MfaConfirmRequest, claims: JwtClaims = Depends(current_claims)) -> dict:
+        if not state.mfa.confirm(claims.tenant_id, claims.user_id, body.code):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid code; MFA not activated.")
+        return {"enrolled": True}
+
+    @app.get("/auth/mfa/status", tags=["auth"])
+    async def mfa_status(claims: JwtClaims = Depends(current_claims)) -> dict:
+        return {"enrolled": state.mfa.is_enrolled(claims.tenant_id, claims.user_id)}
+
+    @app.post("/auth/mfa/disable", tags=["auth"])
+    async def mfa_disable(body: MfaConfirmRequest, claims: JwtClaims = Depends(current_claims)) -> dict:
+        if not state.mfa.disable(claims.tenant_id, claims.user_id, body.code):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid code; MFA not disabled.")
+        return {"enrolled": False}
 
     # ── Query ────────────────────────────────────────────────────────────
     @app.post("/query", tags=["research"])

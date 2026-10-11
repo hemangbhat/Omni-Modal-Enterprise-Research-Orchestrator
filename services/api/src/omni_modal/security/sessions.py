@@ -36,6 +36,7 @@ from omni_modal.security.auth import _make_jwt, jwt_secret_from_env
 _SESS_PREFIX = "omero:rt:sess:"
 _USED_PREFIX = "omero:rt:used:"
 _FAM_PREFIX = "omero:rt:fam:"
+_PENDING_PREFIX = "omero:pending:"
 
 DEFAULT_ACCESS_TTL = 15 * 60          # 15 minutes
 DEFAULT_REFRESH_TTL = 30 * 24 * 3600  # 30 days
@@ -212,6 +213,23 @@ class SessionService:
             self._kv.put_json(_USED_PREFIX + h, {"family_id": session["family_id"]}, self._refresh_ttl)
             return True
         return False
+
+    # ── Short-lived pending state (e.g. MFA step-up between password + 2FA) ──
+    def stash(self, data: dict, ttl: int = 300) -> str:
+        """Store short-lived data, returning an opaque nonce to retrieve it."""
+        nonce = secrets.token_urlsafe(24)
+        self._kv.put_json(_PENDING_PREFIX + nonce, data, ttl)
+        return nonce
+
+    def unstash(self, nonce: str) -> dict | None:
+        """Retrieve and delete stashed data (single use). None if missing/expired."""
+        if not nonce:
+            return None
+        key = _PENDING_PREFIX + nonce
+        data = self._kv.get_json(key)
+        if data is not None:
+            self._kv.delete(key)
+        return data
 
     # ── internals ──────────────────────────────────────────────────────
     def _build_response(self, view: _AccountView, family_id: str) -> dict:

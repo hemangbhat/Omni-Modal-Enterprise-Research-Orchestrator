@@ -57,6 +57,17 @@ def test_real_migrations_dir_includes_rls():
     assert names.index("0001_initial.sql") < names.index("0008_rls.sql")
 
 
+def test_auth_recovery_migration_follows_rls_and_defines_both_tables():
+    migrate = _load_migrate()
+    files = migrate.discover_migrations(migrate.MIGRATIONS_DIR)
+    names = [p.name for p in files]
+    assert names.index("0008_rls.sql") < names.index("0009_auth_recovery.sql")
+    sql = next(p for p in files if p.name == "0009_auth_recovery.sql").read_text(encoding="utf-8")
+    assert "CREATE TABLE IF NOT EXISTS user_mfa" in sql
+    assert "CREATE TABLE IF NOT EXISTS password_reset_tokens" in sql
+    assert "CREATE POLICY tenant_isolation ON user_mfa" in sql
+
+
 # ── RLS helper ──────────────────────────────────────────────────────────────
 class _FakeCursor:
     def __init__(self, sink):

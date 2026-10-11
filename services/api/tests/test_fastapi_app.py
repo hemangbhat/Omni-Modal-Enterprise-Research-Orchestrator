@@ -8,6 +8,7 @@ JWT auth dependency, RBAC, and OpenAPI generation deterministically.
 from __future__ import annotations
 
 import os
+import time
 import unittest
 
 import _path  # noqa: F401
@@ -20,6 +21,7 @@ os.environ.pop("GEMINI_API_KEY", None)
 from fastapi.testclient import TestClient  # noqa: E402
 
 from omni_modal.api.app import create_app  # noqa: E402
+from omni_modal.security.mfa import totp  # noqa: E402
 
 
 class FastApiAppTests(unittest.TestCase):
@@ -156,6 +158,140 @@ class FastApiAppTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertIn("text/event-stream", r.headers.get("content-type", ""))
         self.assertIn("event: done", r.text)
+
+    # ── MFA (TOTP step-up) ───────────────────────────────────────────────
+    def _enrol_mfa(self, email: str) -> str:
+        """Register, enrol and confirm MFA. Returns the TOTP secret.
+
+        Confirms with the previous time step's code so the current and later
+        steps stay unused for the test body (accepted codes are single-use).
+        """
+        token = self._register(email)
+        auth = {"Authorization": f"Bearer {token}"}
+        r = self.client.post("/auth/mfa/enroll", headers=auth)
+        self.assertEqual(r.status_code, 200, r.text)
+        secret = r.json()["secret"]
+        r = self.client.post(
+            "/auth/mfa/confirm", headers=auth,
+            json={"code": totp(secret, for_time=time.time() - 30)},
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json(), {"enrolled": True})
+        return secret
+
+    def _login(self, email: str):
+        return self.client.post("/auth/login", json={"email": email, "password": "password123"})
+
+    def test_login_without_mfa_keeps_auth_response_shape(self) -> None:
+        self._register("fa-nomfa@example.com")
+        body = self._login("fa-nomfa@example.com").json()
+        self.assertNotIn("mfa_required", body)
+        for key in ("token", "refresh_token", "roles", "tenant_id", "user_id", "email", "expires_at"):
+            self.assertIn(key, body)
+
+    def test_started_but_unconfirmed_enrolment_does_not_gate_login(self) -> None:
+        token = self._register("fa-mfa-pending@example.com")
+        self.client.post("/auth/mfa/enroll", headers={"Authorization": f"Bearer {token}"})
+        body = self._login("fa-mfa-pending@example.com").json()
+        self.assertNotIn("mfa_required", body)
+        self.assertIn("token", body)
+
+    def test_mfa_enrol_confirm_then_login_requires_code(self) -> None:
+        self._enrol_mfa("fa-mfa-gate@example.com")
+        r = self._login("fa-mfa-gate@example.com")
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertIs(body["mfa_required"], True)
+        self.assertTrue(body["mfa_token"])
+        self.assertNotIn("token", body)
+        self.assertNotIn("refresh_token", body)
+
+    def test_mfa_login_with_valid_code_issues_tokens(self) -> None:
+        secret = self._enrol_mfa("fa-mfa-ok@example.com")
+        challenge = self._login("fa-mfa-ok@example.com").json()
+        r = self.client.post(
+            "/auth/mfa/login", json={"mfa_token": challenge["mfa_token"], "code": totp(secret)}
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(len(body["token"].split(".")), 3)
+        self.assertEqual(body["email"], "fa-mfa-ok@example.com")
+        self.assertTrue(body["refresh_token"])
+
+    def test_mfa_token_is_single_use(self) -> None:
+        secret = self._enrol_mfa("fa-mfa-once@example.com")
+        challenge = self._login("fa-mfa-once@example.com").json()
+        first = self.client.post(
+            "/auth/mfa/login", json={"mfa_token": challenge["mfa_token"], "code": totp(secret)}
+        )
+        self.assertEqual(first.status_code, 200, first.text)
+        again = self.client.post(
+            "/auth/mfa/login",
+            json={"mfa_token": challenge["mfa_token"], "code": totp(secret, for_time=time.time() + 30)},
+        )
+        self.assertEqual(again.status_code, 401)
+
+    def test_mfa_wrong_code_returns_a_fresh_challenge_token(self) -> None:
+        secret = self._enrol_mfa("fa-mfa-retry@example.com")
+        challenge = self._login("fa-mfa-retry@example.com").json()
+        bad = self.client.post(
+            "/auth/mfa/login", json={"mfa_token": challenge["mfa_token"], "code": "000000"}
+        )
+        self.assertEqual(bad.status_code, 401)
+        next_token = bad.json()["detail"]["mfa_token"]
+        self.assertTrue(next_token)
+        self.assertNotEqual(next_token, challenge["mfa_token"])
+        ok = self.client.post("/auth/mfa/login", json={"mfa_token": next_token, "code": totp(secret)})
+        self.assertEqual(ok.status_code, 200, ok.text)
+
+    def test_mfa_five_wrong_codes_kills_challenge(self) -> None:
+        secret = self._enrol_mfa("fa-mfa-lock@example.com")
+        mfa_token = self._login("fa-mfa-lock@example.com").json()["mfa_token"]
+        seen = [mfa_token]
+        for attempt in range(1, 6):
+            r = self.client.post("/auth/mfa/login", json={"mfa_token": mfa_token, "code": "000000"})
+            self.assertEqual(r.status_code, 401)
+            mfa_token = r.json()["detail"]["mfa_token"]
+            if attempt < 5:
+                self.assertTrue(mfa_token, f"attempt {attempt} should allow a retry")
+                seen.append(mfa_token)
+        self.assertIsNone(mfa_token)
+        for stale in seen:
+            r = self.client.post("/auth/mfa/login", json={"mfa_token": stale, "code": totp(secret)})
+            self.assertEqual(r.status_code, 401)
+
+    def test_mfa_disable_restores_password_only_login(self) -> None:
+        secret = self._enrol_mfa("fa-mfa-off@example.com")
+        challenge = self._login("fa-mfa-off@example.com").json()
+        session = self.client.post(
+            "/auth/mfa/login", json={"mfa_token": challenge["mfa_token"], "code": totp(secret)}
+        ).json()
+        auth = {"Authorization": f"Bearer {session['token']}"}
+        self.assertEqual(self.client.get("/auth/mfa/status", headers=auth).json(), {"enrolled": True})
+        bad = self.client.post("/auth/mfa/disable", headers=auth, json={"code": "000000"})
+        self.assertEqual(bad.status_code, 400)
+        r = self.client.post(
+            "/auth/mfa/disable", headers=auth,
+            json={"code": totp(secret, for_time=time.time() + 30)},
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json(), {"enrolled": False})
+        self.assertIn("token", self._login("fa-mfa-off@example.com").json())
+
+    def test_mfa_enrol_labels_the_authenticator_entry_with_the_given_name(self) -> None:
+        token = self._register("fa-mfa-label@example.com")
+        r = self.client.post(
+            "/auth/mfa/enroll", headers={"Authorization": f"Bearer {token}"},
+            json={"account_name": "fa-mfa-label@example.com"},
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIn("OMERO%3Afa-mfa-label%40example.com", r.json()["otpauth_uri"])
+
+    def test_mfa_endpoints_require_bearer(self) -> None:
+        self.assertEqual(self.client.post("/auth/mfa/enroll").status_code, 401)
+        self.assertEqual(self.client.post("/auth/mfa/confirm", json={"code": "123456"}).status_code, 401)
+        self.assertEqual(self.client.get("/auth/mfa/status").status_code, 401)
+        self.assertEqual(self.client.post("/auth/mfa/disable", json={"code": "123456"}).status_code, 401)
 
 
 if __name__ == "__main__":

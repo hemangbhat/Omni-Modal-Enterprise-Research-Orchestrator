@@ -8,26 +8,13 @@ import { apiRequest } from "@/lib/api-client";
 import { getClientApiConfig } from "@/lib/env";
 import { withWorkspaceQuery } from "@/lib/workspace";
 
-type Classification = "Confidential" | "Internal" | "Legal Hold" | "Public";
-
 type LiveArchive = {
   id: string;
   name: string;
   title: string;
-  kind: string;
-  classification: Classification;
-  archived: string;
-  accessed: string;
-  expiry: string;
-  size: string;
+  source_kind: string;
+  chunk_count: number;
   status: string;
-};
-
-const classMeta: Record<Classification, string> = {
-  Confidential: "bg-error-container/20 text-error border-error/20",
-  Internal: "bg-primary/10 text-primary border-primary/20",
-  "Legal Hold": "bg-tertiary-container/20 text-on-tertiary-container border-tertiary-container/30",
-  Public: "bg-outline-variant/30 text-on-surface-variant border-outline-variant/50",
 };
 
 export default function ArchivesPage() {
@@ -82,7 +69,7 @@ export default function ArchivesPage() {
                 <p className="font-body-md text-body-md text-on-surface-variant/80">
                   {loading
                     ? "Loading archives…"
-                    : `${filtered.length} indexed document${filtered.length !== 1 ? "s" : ""} in cold storage.`}
+                    : `${filtered.length} indexed document${filtered.length !== 1 ? "s" : ""}.`}
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-md">
@@ -96,24 +83,6 @@ export default function ArchivesPage() {
                     className="rounded-full border border-outline-variant/30 bg-surface-container py-1.5 pl-10 pr-4 font-body-md text-body-md text-on-surface placeholder:text-on-surface-variant/50 focus:border-primary/50 focus:outline-none focus:ring-1 focus:ring-primary/50"
                   />
                 </div>
-                <button className="flex items-center gap-sm rounded-lg bg-primary px-lg py-2.5 font-label-md text-on-primary shadow-lg shadow-primary/10 transition-all hover:bg-primary-container">
-                  <MaterialIcon name="refresh" size={18} /> Sync Storage
-                </button>
-              </div>
-            </div>
-
-            {/* Retention policy */}
-            <div className="flex items-start gap-md overflow-hidden rounded-xl border border-outline-variant/20 bg-surface-container p-md shadow-lg">
-              <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/30 to-transparent" />
-              <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border border-outline-variant/30 bg-surface-container-high">
-                <MaterialIcon name="policy" className="text-primary" />
-              </div>
-              <div>
-                <h3 className="mb-1 font-label-md text-label-md font-bold text-primary">Retention Schedule</h3>
-                <p className="text-[12px] leading-relaxed text-on-surface-variant/80">
-                  All indexed documents are preserved in cold storage for{" "}
-                  <strong className="text-on-surface">7 years</strong> post-completion per enterprise compliance mandates.
-                </p>
               </div>
             </div>
 
@@ -127,7 +96,7 @@ export default function ArchivesPage() {
             ) : loading ? (
               <div className="flex items-center justify-center py-xl">
                 <div className="h-8 w-8 animate-spin rounded-full border-2 border-outline-variant border-t-primary-fixed-dim" />
-                <span className="ml-md font-body-md text-body-md text-on-surface-variant">Loading cold storage…</span>
+                <span className="ml-md font-body-md text-body-md text-on-surface-variant">Loading documents…</span>
               </div>
             ) : filtered.length === 0 ? (
               <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-outline-variant/30 p-xl text-center">
@@ -138,7 +107,7 @@ export default function ArchivesPage() {
                 <p className="mb-lg font-body-md text-body-md text-on-surface-variant">
                   {search
                     ? `No archives match "${search}".`
-                    : "Indexed documents automatically appear here as archived records."}
+                    : "Indexed documents are listed here."}
                 </p>
                 {!search && (
                   <Link
@@ -157,17 +126,14 @@ export default function ArchivesPage() {
                       <tr>
                         <th className="px-md py-sm font-label-md text-label-md font-semibold text-on-surface-variant">Archive Name</th>
                         <th className="px-md py-sm font-label-md text-label-md font-semibold text-on-surface-variant">Title</th>
-                        <th className="px-md py-sm font-label-md text-label-md font-semibold text-on-surface-variant">Classification</th>
                         <th className="px-md py-sm font-label-md text-label-md font-semibold text-on-surface-variant">Type</th>
-                        <th className="px-md py-sm font-label-md text-label-md font-semibold text-on-surface-variant">Retention</th>
+                        <th className="px-md py-sm font-label-md text-label-md font-semibold text-on-surface-variant">Chunks</th>
                         <th className="px-md py-sm font-label-md text-label-md font-semibold text-on-surface-variant">Status</th>
-                        <th className="w-12 px-md py-sm text-center" />
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-outline-variant/10 font-body-md text-body-md text-on-surface">
                       {filtered.map((archive) => {
                         const active = archive.id === selectedId;
-                        const cls = archive.classification in classMeta ? archive.classification : "Internal";
                         return (
                           <tr
                             key={archive.id}
@@ -179,30 +145,20 @@ export default function ArchivesPage() {
                                 <MaterialIcon name="folder_zip" size={20} className={active ? "text-primary" : "text-on-surface-variant/40"} />
                                 <div>
                                   <div className="text-sm font-medium text-on-surface">{archive.name}</div>
-                                  <div className="text-[10px] uppercase tracking-widest text-on-surface-variant/60">{archive.kind}</div>
+                                  <div className="text-[10px] uppercase tracking-widest text-on-surface-variant/60">{archive.source_kind}</div>
                                 </div>
                               </div>
                             </td>
                             <td className="px-md py-2.5 text-sm text-on-surface-variant max-w-[180px]">
                               <span className="block truncate" title={archive.title}>{archive.title}</span>
                             </td>
-                            <td className="px-md py-2.5">
-                              <span className={`rounded border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider ${classMeta[cls as Classification]}`}>
-                                {cls}
-                              </span>
-                            </td>
-                            <td className="px-md py-2.5 text-sm text-on-surface-variant">{archive.kind.split(" •")[0]}</td>
-                            <td className="px-md py-2.5 font-mono-sm text-sm text-on-surface-variant">{archive.expiry}</td>
+                            <td className="px-md py-2.5 text-sm uppercase text-on-surface-variant">{archive.source_kind}</td>
+                            <td className="px-md py-2.5 font-mono-sm text-sm text-on-surface-variant">{archive.chunk_count}</td>
                             <td className="px-md py-2.5">
                               <span className="inline-flex items-center gap-1 rounded-full border border-primary/20 bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
                                 <span className="h-1.5 w-1.5 rounded-full bg-primary" />
                                 {archive.status}
                               </span>
-                            </td>
-                            <td className="px-md py-2.5 text-center">
-                              <button className="text-on-surface-variant hover:text-primary">
-                                <MaterialIcon name="more_vert" size={20} />
-                              </button>
                             </td>
                           </tr>
                         );
@@ -229,7 +185,12 @@ export default function ArchivesPage() {
               <MaterialIcon name="info" className="text-primary" />
               Document Inspector
             </h2>
-            <button onClick={() => setSelectedId(null)} className="text-on-surface-variant hover:text-primary">
+            <button
+              type="button"
+              aria-label="Close inspector"
+              onClick={() => setSelectedId(null)}
+              className="text-on-surface-variant hover:text-primary"
+            >
               <MaterialIcon name="close" />
             </button>
           </div>
@@ -247,9 +208,6 @@ export default function ArchivesPage() {
                     </div>
                   </div>
                 </div>
-                <span className={`rounded border px-2 py-1 text-[10px] font-bold uppercase tracking-wider ${classMeta[selected.classification in classMeta ? selected.classification : "Internal"]}`}>
-                  {selected.classification}
-                </span>
               </div>
               <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 border-t border-outline-variant/20 pt-4 text-sm">
                 <div className="text-xs uppercase tracking-wider text-on-surface-variant">Status</div>
@@ -257,11 +215,9 @@ export default function ArchivesPage() {
                   <span className="inline-block h-2 w-2 rounded-full bg-primary" /> {selected.status}
                 </div>
                 <div className="text-xs uppercase tracking-wider text-on-surface-variant">Type</div>
-                <div className="font-mono-sm text-on-surface">{selected.kind}</div>
-                <div className="text-xs uppercase tracking-wider text-on-surface-variant">Retention</div>
-                <div className="font-mono-sm text-on-surface">{selected.expiry}</div>
-                <div className="text-xs uppercase tracking-wider text-on-surface-variant">Archived</div>
-                <div className="font-mono-sm text-on-surface">{selected.archived}</div>
+                <div className="font-mono-sm uppercase text-on-surface">{selected.source_kind}</div>
+                <div className="text-xs uppercase tracking-wider text-on-surface-variant">Chunks indexed</div>
+                <div className="font-mono-sm text-on-surface">{selected.chunk_count}</div>
               </div>
             </div>
             <div className="flex flex-col gap-sm">
@@ -269,7 +225,7 @@ export default function ArchivesPage() {
                 href="/research"
                 className="flex w-full items-center justify-center gap-sm rounded-lg bg-primary py-md font-label-md text-label-md text-on-primary transition-colors hover:bg-primary-container"
               >
-                <MaterialIcon name="science" size={18} /> Query this Archive
+                <MaterialIcon name="science" size={18} /> Ask about this document
               </Link>
               <Link
                 href="/documents"

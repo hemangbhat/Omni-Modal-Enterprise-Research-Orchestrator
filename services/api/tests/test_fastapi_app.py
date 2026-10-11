@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from omni_modal.api.app import create_app  # noqa: E402
 from omni_modal.api.app import state as app_state  # noqa: E402
+from omni_modal.qa.in_memory_store import StoredChunk  # noqa: E402
 from omni_modal.security.mfa import totp  # noqa: E402
 
 
@@ -160,6 +161,35 @@ class FastApiAppTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertIn("text/event-stream", r.headers.get("content-type", ""))
         self.assertIn("event: done", r.text)
+
+    # ── Document-derived views carry no invented fields ──────────────────
+    def _seed_document(self, email: str) -> dict:
+        """Register a user and index one chunk for their tenant. Returns auth headers."""
+        reg = self.client.post("/auth/register", json={"email": email, "password": "password123"}).json()
+        app_state.vector_store.add(StoredChunk(
+            tenant_id=reg["tenant_id"], document_id="doc-1", title="Q3 Board Minutes",
+            source_type="pdf", chunk_id="doc-1-0", chunk_index=0,
+            content="Revenue grew.", embedding=[0.0],
+        ))
+        return {"Authorization": f"Bearer {reg['token']}"}
+
+    def test_projects_report_only_facts_about_the_document(self) -> None:
+        auth = self._seed_document("fa-projects@example.com")
+        items = self.client.get("/projects", headers=auth).json()["projects"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["name"], "Q3 Board Minutes")
+        self.assertEqual(items[0]["chunk_count"], 1)
+        for invented in ("status", "priority", "updated"):
+            self.assertNotIn(invented, items[0])
+
+    def test_archives_report_only_facts_about_the_document(self) -> None:
+        auth = self._seed_document("fa-archives@example.com")
+        items = self.client.get("/archives", headers=auth).json()["archives"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["title"], "Q3 Board Minutes")
+        self.assertEqual(items[0]["source_kind"], "pdf")
+        for invented in ("kind", "classification", "expiry", "archived", "accessed", "size"):
+            self.assertNotIn(invented, items[0])
 
     # ── MFA (TOTP step-up) ───────────────────────────────────────────────
     def _enrol_mfa(self, email: str) -> str:

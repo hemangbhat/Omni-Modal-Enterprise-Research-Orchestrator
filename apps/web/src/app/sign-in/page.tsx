@@ -11,16 +11,17 @@ import { isMfaChallenge, login, mfaLogin, MfaCodeError, type AuthResult } from "
 /**
  * Sign-in page.
  *
- * The backend authenticates requests with a JWT bearer token (HS256). This
- * page lets you start a session either by:
- *   1. One click using the demo token shipped via NEXT_PUBLIC_API_TOKEN, or
- *   2. Pasting a token minted with `python scripts/issue_jwt.py ...`.
+ * Email + password via `POST /auth/login`. Accounts with two-step sign-in get
+ * a second screen asking for their authenticator code (`POST /auth/mfa/login`).
+ * The access token is stored in the browser session and sent on every API
+ * call; signing out clears it.
  *
- * The chosen token is stored in the browser session and sent on every API
- * call. Signing out clears it. In production this page would integrate with
- * an identity provider (NextAuth, Auth0, Okta) instead of accepting a raw
- * token.
+ * Development builds also offer sign-in with a raw JWT (the demo token from
+ * NEXT_PUBLIC_API_TOKEN, or one minted with `python scripts/issue_jwt.py`).
  */
+// Signing in with a raw JWT (demo token or pasted token) is a development aid.
+const SHOW_TOKEN_SIGN_IN = process.env.NODE_ENV !== "production";
+
 export default function SignInPage() {
   const router = useRouter();
   const { signIn, isAuthenticated, isReady } = useAuth();
@@ -145,7 +146,7 @@ export default function SignInPage() {
         <div className="premium-card rounded-2xl p-xl">
           <h2 className="mb-sm font-headline-md text-headline-md text-on-surface">Sign in</h2>
           <p className="mb-xl font-body-md text-body-md text-on-surface-variant">
-            Start a session with a JWT bearer token. The backend verifies it with HS256.
+            Sign in with your email and password.
           </p>
 
           {error ? (
@@ -240,6 +241,9 @@ export default function SignInPage() {
               </p>
             </form>
 
+            {/* Developer-only token sign-in. Never shown in production builds. */}
+            {SHOW_TOKEN_SIGN_IN ? (
+            <>
             <div className="flex items-center gap-md">
               <span className="h-px flex-1 bg-outline-variant/20" />
               <span className="font-mono-sm text-[11px] uppercase tracking-widest text-on-surface-variant/60">
@@ -315,6 +319,8 @@ export default function SignInPage() {
   --roles researcher,admin`}
               </pre>
             </div>
+            </>
+            ) : null}
           </div>
           )}
 

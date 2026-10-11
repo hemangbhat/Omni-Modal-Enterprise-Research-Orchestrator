@@ -8,31 +8,14 @@ import { apiRequest } from "@/lib/api-client";
 import { getClientApiConfig } from "@/lib/env";
 import { withWorkspaceQuery } from "@/lib/workspace";
 
-type ProjectStatus = "Active" | "Completed";
-
 type LiveProject = {
   id: string;
   code: string;
   name: string;
   icon: string;
-  status: ProjectStatus;
   source_kind: string;
   chunk_count: number;
-  updated: string;
-  docs: number;
 };
-
-function ProjectStatusBadge({ status }: { status: ProjectStatus }) {
-  return status === "Active" ? (
-    <span className="inline-flex items-center rounded border border-primary/20 bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
-      Active
-    </span>
-  ) : (
-    <span className="inline-flex items-center rounded border border-outline-variant bg-surface-bright px-2 py-0.5 text-xs font-medium text-on-surface-variant">
-      Completed
-    </span>
-  );
-}
 
 export default function ProjectsPage() {
   const [projects, setProjects] = useState<LiveProject[]>([]);
@@ -147,11 +130,8 @@ export default function ProjectsPage() {
                     <thead>
                       <tr className="border-b border-outline-variant font-label-md text-label-md text-on-surface-variant">
                         <th className="px-md py-sm font-medium">Project Name</th>
-                        <th className="px-md py-sm font-medium">Status</th>
                         <th className="px-md py-sm font-medium">Type</th>
                         <th className="px-md py-sm font-medium">Chunks</th>
-                        <th className="px-md py-sm font-medium">Last Updated</th>
-                        <th className="w-16 px-md py-sm text-right" />
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-outline-variant/50 font-body-md text-body-md text-on-surface">
@@ -178,17 +158,8 @@ export default function ProjectsPage() {
                                 </div>
                               </div>
                             </td>
-                            <td className="px-md py-sm">
-                              <ProjectStatusBadge status={project.status} />
-                            </td>
                             <td className="px-md py-sm capitalize text-on-surface-variant">{project.source_kind}</td>
                             <td className="px-md py-sm font-mono-sm text-on-surface-variant">{project.chunk_count}</td>
-                            <td className="px-md py-sm font-mono-sm text-sm text-on-surface-variant">{project.updated}</td>
-                            <td className="px-md py-sm text-right">
-                              <button className="rounded p-1 text-on-surface-variant transition-colors hover:bg-surface-bright hover:text-on-surface">
-                                <MaterialIcon name="more_vert" size={18} />
-                              </button>
-                            </td>
                           </tr>
                         );
                       })}
@@ -209,15 +180,14 @@ export default function ProjectsPage() {
         <aside className="z-20 hidden w-[380px] flex-shrink-0 flex-col border-l border-outline-variant bg-surface-container xl:flex">
           <header className="flex items-start justify-between border-b border-outline-variant bg-surface-container-high p-lg">
             <div>
-              <div className="mb-xs flex items-center gap-sm">
-                <ProjectStatusBadge status={selected.status} />
-              </div>
               <h3 className="mb-xs font-headline-md text-headline-md font-semibold text-on-surface">
                 {selected.name}
               </h3>
               <p className="text-sm text-on-surface-variant">ID: {selected.code}</p>
             </div>
             <button
+              type="button"
+              aria-label="Close details"
               onClick={() => setOpen(false)}
               className="rounded p-1 text-on-surface-variant transition-colors hover:bg-surface-bright hover:text-on-surface"
             >
@@ -255,10 +225,6 @@ export default function ProjectsPage() {
                 <div className="flex justify-between">
                   <span className="text-on-surface-variant">Chunks indexed</span>
                   <span className="font-mono-sm text-on-surface">{selected.chunk_count}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-on-surface-variant">Last updated</span>
-                  <span className="font-mono-sm text-on-surface">{selected.updated}</span>
                 </div>
               </div>
             </div>

@@ -507,14 +507,8 @@ class OmniModalHandler(BaseHTTPRequestHandler):
                     "code": f"PRJ-{doc_id[:8].upper()}",
                     "name": str(doc["name"]),
                     "icon": "science" if doc["source_kind"] == "audio" else "description",
-                    "status": "Active",
-                    "priority": "Medium",
                     "source_kind": doc["source_kind"],
                     "chunk_count": doc["chunk_count"],
-                    "updated": "Recently",
-                    "created": "—",
-                    "target": "—",
-                    "docs": int(doc["chunk_count"]),
                 })
         else:
             # pgvector path: query documents table
@@ -540,12 +534,8 @@ class OmniModalHandler(BaseHTTPRequestHandler):
                             "code": f"PRJ-{str(row['id'])[:8].upper()}",
                             "name": row["name"],
                             "icon": "science" if row["source_kind"] == "audio" else "description",
-                            "status": "Active",
-                            "priority": "Medium",
                             "source_kind": row["source_kind"],
                             "chunk_count": int(row["chunk_count"]),
-                            "updated": str(row.get("created_at", "—")),
-                            "docs": int(row["chunk_count"]),
                         })
                 except Exception as exc:
                     observability.capture_exception(exc, operation="projects.list")
@@ -555,10 +545,9 @@ class OmniModalHandler(BaseHTTPRequestHandler):
     def _handle_list_archives(self, claims: JwtClaims | None, workspace_id: str | None = None) -> None:
         """GET /archives — return completed/archived documents as archive records.
 
-        For the in-memory path: completed documents that have been indexed are
-        shown as cold-storage archives. In production this would read from a
-        dedicated archives table with retention metadata. When ``workspace_id``
-        is set, only that workspace's documents are shown.
+        There is no archive action yet, so this lists indexed documents with
+        the facts the system actually has (title, type, chunk count, status).
+        When ``workspace_id`` is set, only that workspace's documents are shown.
         """
         tenant_id = claims.tenant_id if claims else "demo-tenant"
         ws_filter = self._saas.documents_in_workspace(workspace_id) if workspace_id else None
@@ -575,14 +564,11 @@ class OmniModalHandler(BaseHTTPRequestHandler):
                         "id": chunk.document_id,
                         "name": f"ARC-{chunk.document_id[:8].upper()}",
                         "title": chunk.title,
-                        "kind": f"{chunk.source_type.upper()} • AES-256",
-                        "classification": "Internal",
-                        "archived": "—",
-                        "accessed": "Recently",
-                        "expiry": "7 years from creation",
-                        "size": "—",
-                        "status": "indexed",
+                        "source_kind": chunk.source_type,
+                        "chunk_count": 0,
+                        "status": "ready",
                     }
+                seen[chunk.document_id]["chunk_count"] = int(seen[chunk.document_id]["chunk_count"]) + 1
             archives = list(seen.values())
         else:
             if os.environ.get("DATABASE_URL"):
@@ -592,10 +578,13 @@ class OmniModalHandler(BaseHTTPRequestHandler):
                     with psycopg.connect(os.environ["DATABASE_URL"], row_factory=dict_row) as conn:
                         rows = conn.execute(
                             """
-                            SELECT id, title, source_type, status, created_at
-                            FROM documents
-                            WHERE tenant_id = %s AND status = 'ready'
-                            ORDER BY created_at DESC LIMIT 100
+                            SELECT d.id, d.title, d.source_type, d.status,
+                                   COUNT(c.id) AS chunk_count
+                            FROM documents d
+                            LEFT JOIN document_chunks c ON c.document_id = d.id
+                            WHERE d.tenant_id = %s AND d.status = 'ready'
+                            GROUP BY d.id, d.title, d.source_type, d.status, d.created_at
+                            ORDER BY d.created_at DESC LIMIT 100
                             """,
                             (tenant_id,),
                         ).fetchall()
@@ -604,12 +593,8 @@ class OmniModalHandler(BaseHTTPRequestHandler):
                             "id": str(row["id"]),
                             "name": f"ARC-{str(row['id'])[:8].upper()}",
                             "title": row["title"],
-                            "kind": f"{row['source_type'].upper()} • AES-256",
-                            "classification": "Internal",
-                            "archived": str(row.get("created_at", "—"))[:10],
-                            "accessed": "—",
-                            "expiry": "7 years",
-                            "size": "—",
+                            "source_kind": row["source_type"],
+                            "chunk_count": int(row["chunk_count"]),
                             "status": row["status"],
                         })
                 except Exception as exc:

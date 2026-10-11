@@ -811,8 +811,7 @@ def create_app() -> FastAPI:
             out.append({
                 "id": did, "code": f"PRJ-{did[:8].upper()}", "name": d["title"],
                 "icon": "science" if d["source_kind"] == "audio" else "description",
-                "status": "Active", "priority": "Medium", "source_kind": d["source_kind"],
-                "chunk_count": d["chunk_count"], "docs": d["chunk_count"], "updated": "Recently",
+                "source_kind": d["source_kind"], "chunk_count": d["chunk_count"],
             })
         return {"projects": out, "total": len(out)}
 
@@ -824,9 +823,8 @@ def create_app() -> FastAPI:
             did = d["document_id"]
             out.append({
                 "id": did, "name": f"ARC-{did[:8].upper()}", "title": d["title"],
-                "kind": f"{str(d['source_kind']).upper()} • AES-256", "classification": "Internal",
-                "archived": "—", "accessed": "Recently", "expiry": "7 years", "size": "—",
-                "status": "indexed",
+                "source_kind": d["source_kind"], "chunk_count": d["chunk_count"],
+                "status": d.get("status", "ready"),
             })
         return {"archives": out, "total": len(out)}
 

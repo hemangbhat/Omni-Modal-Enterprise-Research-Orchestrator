@@ -208,10 +208,12 @@ export function ResearchChat() {
                     <MaterialIcon name="auto_awesome" size={16} className="text-primary-fixed" />
                     AI Synthesis
                   </span>
-                  <span className="flex items-center gap-sm font-mono-sm text-mono-sm text-on-surface-variant">
-                    <div className="h-2 w-2 rounded-full bg-primary-fixed" />
-                    {isStreaming ? "Synthesizing..." : "Confidence: High"}
-                  </span>
+                  {isStreaming ? (
+                    <span className="flex items-center gap-sm font-mono-sm text-mono-sm text-on-surface-variant">
+                      <span className="h-2 w-2 rounded-full bg-primary-fixed" />
+                      Synthesizing...
+                    </span>
+                  ) : null}
                 </div>
               ) : null}
             </div>
@@ -253,18 +255,10 @@ export function ResearchChat() {
                     void submitPrompt();
                   }
                 }}
-                placeholder="Ask a follow-up question or request deeper analysis..."
+                placeholder="Ask a question about your documents..."
                 className="block w-full resize-none border-none bg-transparent p-lg font-body-lg text-[17px] text-on-surface placeholder-on-surface-variant/40 focus:ring-0 md:p-xl"
               />
-              <div className="flex items-center justify-between px-lg pb-lg pt-sm">
-                <div className="flex gap-md">
-                  <span className="rounded-lg p-sm text-on-surface-variant/70">
-                    <MaterialIcon name="attach_file" size={22} />
-                  </span>
-                  <span className="rounded-lg p-sm text-on-surface-variant/70">
-                    <MaterialIcon name="mic" size={22} />
-                  </span>
-                </div>
+              <div className="flex items-center justify-end px-lg pb-lg pt-sm">
                 <button
                   type="button"
                   onClick={() => void submitPrompt()}
@@ -286,7 +280,6 @@ export function ResearchChat() {
           <h2 className="font-mono-sm text-[11px] font-medium uppercase tracking-[0.15em] text-on-surface-variant">
             Evidence &amp; Sources
           </h2>
-          <MaterialIcon name="tune" size={20} className="text-on-surface-variant" />
         </div>
         <div className="flex flex-1 flex-col gap-lg overflow-y-auto px-lg pb-xl">
           {citations.length === 0 ? (
@@ -297,7 +290,7 @@ export function ResearchChat() {
             citations.map((cite, index) => (
               <div
                 key={`${cite.title}-${index}`}
-                className="group relative cursor-pointer overflow-hidden rounded-2xl border border-outline-variant/20 bg-gradient-to-br from-surface-container-low to-surface/40 p-lg shadow-lg transition-all duration-300 hover:border-primary-fixed/30"
+                className="group relative overflow-hidden rounded-2xl border border-outline-variant/20 bg-gradient-to-br from-surface-container-low to-surface/40 p-lg shadow-lg transition-all duration-300 hover:border-primary-fixed/30"
               >
                 <div className="absolute -right-10 -top-10 h-32 w-32 rounded-full bg-primary-fixed/5 blur-2xl transition-all group-hover:bg-primary-fixed/10" />
                 <div className="relative mb-lg flex items-center gap-md">

@@ -8,6 +8,7 @@
  * failure.
  */
 
+import { parseApiError } from "@/lib/api-error";
 import { apiRequest } from "@/lib/api-client";
 import { getClientApiConfig } from "@/lib/env";
 
@@ -131,21 +132,16 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
     { method: "POST", headers: authHeaders(), body: JSON.stringify(body) },
     { baseUrl }
   );
-  if (res.status === 402) {
-    const data = (await res.json().catch(() => ({}))) as {
-      error?: string;
-      metric?: string;
-      limit?: number;
-    };
-    throw new PlanLimitError(
-      data.error ?? "Plan limit reached.",
-      data.metric ?? "unknown",
-      data.limit ?? 0
-    );
-  }
   if (!res.ok) {
-    const data = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(data.error ?? `HTTP ${res.status}`);
+    const { message, fields } = parseApiError(await res.json().catch(() => ({})));
+    if (res.status === 402) {
+      throw new PlanLimitError(
+        message ?? "Plan limit reached.",
+        typeof fields.metric === "string" ? fields.metric : "unknown",
+        typeof fields.limit === "number" ? fields.limit : 0
+      );
+    }
+    throw new Error(message ?? `HTTP ${res.status}`);
   }
   return (await res.json()) as T;
 }

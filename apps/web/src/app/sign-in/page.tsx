@@ -5,8 +5,8 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { MaterialIcon } from "@/components/material-icon";
 import { useAuth } from "@/components/auth-context";
-import { getDemoToken, isTokenExpired } from "@/lib/auth";
-import { login } from "@/lib/auth-api";
+import { getDemoToken, isTokenExpired, setStoredEmail } from "@/lib/auth";
+import { isMfaChallenge, login, mfaLogin, MfaCodeError, type AuthResult } from "@/lib/auth-api";
 
 /**
  * Sign-in page.
@@ -31,6 +31,9 @@ export default function SignInPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  // Set once the password step succeeds for an account with two-step sign-in.
+  const [mfaToken, setMfaToken] = useState<string | null>(null);
+  const [code, setCode] = useState("");
 
   // If already signed in, don't show the form — go to the dashboard.
   useEffect(() => {
@@ -49,10 +52,55 @@ export default function SignInPage() {
     setError(null);
     try {
       const result = await login(email.trim(), password);
-      signIn(result.token, result.refresh_token);
-      router.replace("/");
+      if (isMfaChallenge(result)) {
+        // Password accepted; the account needs its authenticator code next.
+        setMfaToken(result.mfa_token);
+        setCode("");
+        return;
+      }
+      completeSignIn(result);
     } catch (err) {
       setError((err as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  function completeSignIn(result: AuthResult) {
+    setStoredEmail(result.email);
+    signIn(result.token, result.refresh_token);
+    router.replace("/");
+  }
+
+  function backToPassword(message: string | null) {
+    setMfaToken(null);
+    setCode("");
+    setPassword("");
+    setError(message);
+  }
+
+  async function handleCodeSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!mfaToken) return;
+    if (!/^\d{6}$/.test(code.trim())) {
+      setError("Enter the 6-digit code from your authenticator app.");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      completeSignIn(await mfaLogin(mfaToken, code.trim()));
+    } catch (err) {
+      if (err instanceof MfaCodeError && err.nextToken) {
+        // Wrong code, but the challenge is still open — retry with its new token.
+        setMfaToken(err.nextToken);
+        setCode("");
+        setError("That code was not accepted. Wait for a new code and try again.");
+      } else if (err instanceof MfaCodeError) {
+        backToPassword("Too many attempts or the sign-in timed out. Sign in again.");
+      } else {
+        setError((err as Error).message);
+      }
     } finally {
       setSubmitting(false);
     }
@@ -106,6 +154,48 @@ export default function SignInPage() {
             </div>
           ) : null}
 
+          {mfaToken ? (
+            <form onSubmit={handleCodeSubmit} className="space-y-md">
+              <label htmlFor="mfa-code" className="block font-label-md text-label-md text-on-surface">
+                Authenticator code
+              </label>
+              <p className="font-body-md text-[14px] text-on-surface-variant">
+                Open your authenticator app and enter the 6-digit code for OMERO.
+              </p>
+              <input
+                id="mfa-code"
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                pattern="[0-9]*"
+                maxLength={6}
+                autoFocus
+                value={code}
+                onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
+                placeholder="123456"
+                className="block w-full rounded-xl border border-outline-variant/30 bg-surface-container-lowest px-md py-sm text-center font-mono-sm text-[20px] tracking-[0.4em] text-on-surface placeholder:text-on-surface-variant/30 focus:border-primary-fixed-dim/50 focus:outline-none focus:ring-1 focus:ring-primary-fixed-dim/50"
+              />
+              <button
+                type="submit"
+                disabled={submitting}
+                className="flex w-full items-center justify-center gap-sm rounded-xl bg-gradient-to-r from-primary-container to-primary px-lg py-md font-label-md text-label-md font-semibold text-on-primary-container shadow-[0_4px_14px_rgba(0,218,243,0.2)] transition-all hover:-translate-y-0.5 hover:shadow-[0_6px_20px_rgba(0,218,243,0.3)] disabled:opacity-60"
+              >
+                {submitting ? (
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-on-primary-container/40 border-t-on-primary-container" />
+                ) : (
+                  <MaterialIcon name="verified_user" size={18} />
+                )}
+                Verify and sign in
+              </button>
+              <button
+                type="button"
+                onClick={() => backToPassword(null)}
+                className="block w-full text-center font-body-md text-[13px] text-on-surface-variant underline hover:text-on-surface"
+              >
+                Use a different account
+              </button>
+            </form>
+          ) : (
           <div className="space-y-lg">
             {/* Email + password sign in (real credential auth) */}
             <form onSubmit={handleCredentialLogin} className="space-y-md">
@@ -221,6 +311,7 @@ export default function SignInPage() {
               </pre>
             </div>
           </div>
+          )}
 
           <div className="mt-xl flex items-center justify-center gap-sm text-on-surface-variant">
             <MaterialIcon name="security" size={14} />

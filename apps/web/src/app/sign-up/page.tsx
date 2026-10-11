@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { MaterialIcon } from "@/components/material-icon";
 import { useAuth } from "@/components/auth-context";
+import { setStoredEmail } from "@/lib/auth";
 import { register } from "@/lib/auth-api";
 
 /**
@@ -46,6 +47,7 @@ export default function SignUpPage() {
     setError(null);
     try {
       const result = await register(email.trim(), password);
+      setStoredEmail(result.email);
       signIn(result.token, result.refresh_token);
       router.replace("/");
     } catch (err) {

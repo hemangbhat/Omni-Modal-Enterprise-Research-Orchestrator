@@ -23,6 +23,16 @@ describe("saas-api client", () => {
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
       lastUrl = url;
       lastInit = init;
+      if (url.endsWith("/invites") && init?.method === "POST") {
+        // The FastAPI backend nests error fields under `detail`.
+        return jsonResponse(
+          { detail: { error: "Plan limit reached for 'members': 1/1.", metric: "members", limit: 1, upgrade_required: true } },
+          402
+        );
+      }
+      if (url.endsWith("/billing/checkout")) {
+        return jsonResponse({ detail: "Plan 'free' is not purchasable." }, 400);
+      }
       if (url.endsWith("/workspaces") && init?.method === "POST") {
         // Simulate a plan-limit rejection
         return jsonResponse(
@@ -68,6 +78,21 @@ describe("saas-api client", () => {
       expect(e.metric).toBe("workspaces");
       expect(e.limit).toBe(1);
     }
+  });
+
+  it("reads plan-limit fields from a FastAPI detail object on HTTP 402", async () => {
+    const { inviteMember, PlanLimitError } = await import("@/lib/saas-api");
+    const err = await inviteMember("a@b.c", "researcher").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PlanLimitError);
+    const e = err as InstanceType<typeof PlanLimitError>;
+    expect(e.message).toBe("Plan limit reached for 'members': 1/1.");
+    expect(e.metric).toBe("members");
+    expect(e.limit).toBe(1);
+  });
+
+  it("surfaces a FastAPI detail string as the error message", async () => {
+    const { startCheckout } = await import("@/lib/saas-api");
+    await expect(startCheckout("free")).rejects.toThrow("Plan 'free' is not purchasable.");
   });
 
   it("sets Content-Type on POST requests", async () => {

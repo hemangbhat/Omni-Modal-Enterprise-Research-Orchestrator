@@ -71,6 +71,40 @@ export function clearStoredRefreshToken(): void {
 }
 
 /**
+ * The signed-in user's email. The access token does not carry it, so it is
+ * remembered at sign-in for display (e.g. the authenticator-app label when
+ * turning on two-step sign-in). Not a credential.
+ */
+const EMAIL_KEY = "omni_email";
+
+export function getStoredEmail(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage.getItem(EMAIL_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setStoredEmail(email: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(EMAIL_KEY, email);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function clearStoredEmail(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(EMAIL_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
  * The build-time demo/dev token, if one was configured via
  * NEXT_PUBLIC_API_TOKEN. Used to power the one-click "Continue with demo
  * token" button on the sign-in page. Returns null when not configured.

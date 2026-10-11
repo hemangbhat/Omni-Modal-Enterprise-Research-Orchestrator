@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { MaterialIcon } from "@/components/material-icon";
+import { MfaSettings } from "@/components/mfa-settings";
 import { TopBar } from "@/components/top-bar";
 import { apiRequest } from "@/lib/api-client";
 import { getClientApiConfig } from "@/lib/env";
@@ -241,6 +242,8 @@ export default function SettingsPage() {
               </div>
             </section>
           </div>
+        ) : tab === "Security" ? (
+          <MfaSettings />
         ) : (
           <div className="rounded-lg border border-outline-variant/40 bg-surface-container-low p-xl text-center">
             <MaterialIcon name="settings" size={32} className="text-on-surface-variant" />

@@ -141,3 +141,43 @@ describe("auth-api client", () => {
     expect(lastUrl).toContain("/auth/mfa/disable");
   });
 });
+
+describe("auth-api password reset", () => {
+  let lastUrl = "";
+  let lastInit: RequestInit | undefined;
+  let next: () => Response;
+
+  beforeEach(() => {
+    next = () => jsonResponse({ sent: true });
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      lastUrl = url;
+      lastInit = init;
+      return next();
+    });
+  });
+
+  it("forgotPassword posts the email to /auth/password/forgot", async () => {
+    const { forgotPassword } = await import("@/lib/auth-api");
+    await forgotPassword("user@example.com");
+    expect(lastUrl).toContain("/auth/password/forgot");
+    expect(lastInit?.method).toBe("POST");
+    expect(JSON.parse(String(lastInit?.body))).toEqual({ email: "user@example.com" });
+    expect(new Headers(lastInit?.headers).get("Authorization")).toBeNull();
+  });
+
+  it("resetPassword posts the token and new password to /auth/password/reset", async () => {
+    next = () => jsonResponse({ reset: true });
+    const { resetPassword } = await import("@/lib/auth-api");
+    await resetPassword("tok-123", "brand-new-pass");
+    expect(lastUrl).toContain("/auth/password/reset");
+    expect(JSON.parse(String(lastInit?.body))).toEqual({ token: "tok-123", password: "brand-new-pass" });
+  });
+
+  it("resetPassword surfaces the backend's reason when the link is refused", async () => {
+    next = () => jsonResponse({ detail: "This reset link is invalid or has expired." }, 400);
+    const { resetPassword } = await import("@/lib/auth-api");
+    await expect(resetPassword("stale", "brand-new-pass")).rejects.toThrow(
+      "This reset link is invalid or has expired."
+    );
+  });
+});

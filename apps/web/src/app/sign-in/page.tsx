@@ -228,6 +228,11 @@ export default function SignInPage() {
                 Sign in
               </button>
               <p className="text-center font-body-md text-[13px] text-on-surface-variant">
+                <Link href="/forgot-password" className="text-primary-fixed-dim underline hover:text-primary-fixed">
+                  Forgot password?
+                </Link>
+              </p>
+              <p className="text-center font-body-md text-[13px] text-on-surface-variant">
                 New here?{" "}
                 <Link href="/sign-up" className="text-primary-fixed-dim underline hover:text-primary-fixed">
                   Create an account

@@ -115,6 +115,19 @@ export async function mfaDisable(code: string): Promise<void> {
 }
 
 /**
+ * Ask for a password-reset email. Resolves the same way whether or not the
+ * address has an account, so the UI cannot reveal who is registered.
+ */
+export async function forgotPassword(email: string): Promise<void> {
+  await call("/auth/password/forgot", { email });
+}
+
+/** Set a new password using the single-use token from a reset email. */
+export async function resetPassword(token: string, password: string): Promise<void> {
+  await call("/auth/password/reset", { token, password });
+}
+
+/**
  * Exchange a refresh token for a fresh access token (and a rotated refresh
  * token). Throws if the refresh token is invalid, expired, or revoked.
  */

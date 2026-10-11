@@ -86,3 +86,18 @@ describe("getDemoToken", () => {
     expect(getDemoToken()).toBeNull();
   });
 });
+
+describe("signed-in email storage", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+  });
+
+  it("round-trips the email and clears it", async () => {
+    const { clearStoredEmail, getStoredEmail, setStoredEmail } = await import("@/lib/auth");
+    expect(getStoredEmail()).toBeNull();
+    setStoredEmail("user@example.com");
+    expect(getStoredEmail()).toBe("user@example.com");
+    clearStoredEmail();
+    expect(getStoredEmail()).toBeNull();
+  });
+});

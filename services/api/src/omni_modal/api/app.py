@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -46,6 +46,7 @@ from omni_modal.saas import get_saas_service
 from omni_modal.saas.plans import PLANS, PlanLimitExceeded
 from omni_modal.security.accounts import AccountError, get_account_service
 from omni_modal.security.auth import AuthError, JwtClaims, _make_jwt, jwt_secret_from_env, verify_jwt
+from omni_modal.security.mfa import MfaAlreadyEnrolled, MfaLocked
 from omni_modal.security.rbac import RbacError, assert_endpoint_roles
 from omni_modal.security.rate_limiting import RateLimitExceeded
 from omni_modal.security.redis_rate_limiter import select_rate_limiter
@@ -82,6 +83,42 @@ class RefreshRequest(BaseModel):
 
 class LogoutRequest(BaseModel):
     refresh_token: str
+
+
+class MfaConfirmRequest(BaseModel):
+    code: str
+
+
+class MfaLoginRequest(BaseModel):
+    mfa_token: str
+    code: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str = Field(..., max_length=320)
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(..., max_length=512)
+    password: str = Field(..., max_length=1024)
+
+
+INVALID_RESET_LINK = "This reset link is invalid or has expired."
+
+
+class MfaEnrollRequest(BaseModel):
+    # Turning on two-step sign-in re-checks the password, so a stolen access
+    # token alone cannot attach an attacker's authenticator to the account.
+    email: str = Field(..., max_length=320)
+    password: str = Field(..., max_length=1024)
+
+
+# Wrong codes allowed per MFA login challenge before the password step must
+# be repeated. (The second factor itself also locks after repeated wrong
+# codes across challenges: see omni_modal.security.mfa.)
+MFA_MAX_ATTEMPTS = 5
+# How long after the password step a login challenge stays usable.
+MFA_CHALLENGE_SECONDS = 300
 
 
 class QueryRequestModel(BaseModel):
@@ -140,6 +177,8 @@ class _State:
     rate_limiter: Any = None
     query_cache: Any = None
     sessions: Any = None
+    mfa: Any = None
+    password_resets: Any = None
 
 
 state = _State()
@@ -195,6 +234,12 @@ def _build_runtime() -> None:
     from omni_modal.security.sessions import select_session_service  # noqa: PLC0415
 
     state.sessions = select_session_service()
+    from omni_modal.security.mfa import select_mfa_service  # noqa: PLC0415
+
+    state.mfa = select_mfa_service()
+    from omni_modal.security.password_reset import select_password_reset_service  # noqa: PLC0415
+
+    state.password_resets = select_password_reset_service()
     from omni_modal.security.pg_audit_sink import select_audit_sink  # noqa: PLC0415
 
     state.audit_sink = select_audit_sink()
@@ -221,9 +266,10 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    from omni_modal.api.middleware import install_observability  # noqa: PLC0415
+    from omni_modal.api.middleware import install_observability, install_security_headers  # noqa: PLC0415
 
     install_observability(app)
+    install_security_headers(app)
 
     # ── Auth dependency ──────────────────────────────────────────────────
     def current_claims(authorization: str | None = Header(default=None)) -> JwtClaims:
@@ -355,12 +401,166 @@ def create_app() -> FastAPI:
     async def logout(body: LogoutRequest) -> dict:
         return {"revoked": state.sessions.revoke(body.refresh_token)}
 
-    @app.post("/auth/login", response_model=AuthResponse, tags=["auth"])
-    async def login(body: LoginRequest) -> AuthResponse:
+    @app.post("/auth/login", response_model=None, tags=["auth"])
+    async def login(body: LoginRequest):
         account = state.accounts.authenticate(email=body.email, password=body.password)
         if account is None:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password.")
-        return _issue(account)
+        # Step-up: if the account has MFA, require the second factor before
+        # issuing tokens. We stash the authenticated identity behind a one-time
+        # nonce so /auth/mfa/login can complete the session after code check.
+        if state.mfa.is_enrolled(account.tenant_id, account.user_id):
+            nonce = state.sessions.stash(
+                {
+                    "tenant_id": account.tenant_id,
+                    "user_id": account.user_id,
+                    "email": account.email,
+                    "roles": list(account.roles),
+                    "expires_at": time.time() + MFA_CHALLENGE_SECONDS,
+                },
+                ttl=MFA_CHALLENGE_SECONDS,
+            )
+            return {"mfa_required": True, "mfa_token": nonce}
+        return state.sessions.issue(account)
+
+    @app.post("/auth/mfa/login", response_model=AuthResponse, tags=["auth"])
+    async def mfa_login(body: MfaLoginRequest) -> AuthResponse:
+        pending = state.sessions.unstash(body.mfa_token)
+        if pending is None:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "MFA challenge expired or invalid.")
+        remaining = int(float(pending.get("expires_at", 0)) - time.time())
+        if remaining <= 0:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "MFA challenge expired or invalid.")
+        try:
+            accepted = state.mfa.verify(pending["tenant_id"], pending["user_id"], body.code)
+        except MfaLocked as exc:
+            minutes = max(1, round(exc.retry_after / 60))
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                detail={
+                    "error": f"Too many wrong codes. Try again in about {minutes} "
+                             f"minute{'s' if minutes != 1 else ''}.",
+                    "mfa_token": None,
+                },
+                headers={"Retry-After": str(exc.retry_after)},
+            ) from exc
+        if not accepted:
+            # Re-stash so the user can retry with a fresh code. The retry token
+            # keeps the original deadline, and MFA_MAX_ATTEMPTS wrong codes end
+            # the challenge.
+            attempts = int(pending.get("attempts", 0)) + 1
+            new_nonce = None
+            if attempts < MFA_MAX_ATTEMPTS:
+                new_nonce = state.sessions.stash({**pending, "attempts": attempts}, ttl=remaining)
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED,
+                detail={"error": "Invalid MFA code.", "mfa_token": new_nonce},
+            )
+        from types import SimpleNamespace  # noqa: PLC0415
+
+        account = SimpleNamespace(
+            tenant_id=pending["tenant_id"], user_id=pending["user_id"],
+            email=pending.get("email", ""), roles=tuple(pending.get("roles", [])),
+        )
+        return AuthResponse(**state.sessions.issue(account))
+
+    @app.post("/auth/mfa/enroll", tags=["auth"])
+    async def mfa_enroll(body: MfaEnrollRequest, claims: JwtClaims = Depends(current_claims)) -> dict:
+        account = state.accounts.authenticate(email=body.email, password=body.password)
+        if account is None or (account.tenant_id, account.user_id) != (claims.tenant_id, claims.user_id):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, "Enter your current password to turn on two-step sign-in."
+            )
+        try:
+            return state.mfa.begin_enroll(claims.tenant_id, claims.user_id, account.email)
+        except MfaAlreadyEnrolled as exc:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Two-step sign-in is already on. Turn it off first to set up a new authenticator.",
+            ) from exc
+
+    @app.post("/auth/mfa/confirm", tags=["auth"])
+    async def mfa_confirm(body: MfaConfirmRequest, claims: JwtClaims = Depends(current_claims)) -> dict:
+        if not state.mfa.confirm(claims.tenant_id, claims.user_id, body.code):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid code; MFA not activated.")
+        return {"enrolled": True}
+
+    @app.get("/auth/mfa/status", tags=["auth"])
+    async def mfa_status(claims: JwtClaims = Depends(current_claims)) -> dict:
+        return {"enrolled": state.mfa.is_enrolled(claims.tenant_id, claims.user_id)}
+
+    @app.post("/auth/mfa/disable", tags=["auth"])
+    async def mfa_disable(body: MfaConfirmRequest, claims: JwtClaims = Depends(current_claims)) -> dict:
+        try:
+            disabled = state.mfa.disable(claims.tenant_id, claims.user_id, body.code)
+        except MfaLocked as exc:
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS, "Too many wrong codes. Try again later.",
+                headers={"Retry-After": str(exc.retry_after)},
+            ) from exc
+        if not disabled:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid code; MFA not disabled.")
+        return {"enrolled": False}
+
+    # ── Password reset ───────────────────────────────────────────────────
+    def _audit(action: str, outcome: str, metadata: dict) -> None:
+        """Record a security event. Auditing must never break the request."""
+        try:
+            if state.audit_sink is not None:
+                state.audit_sink.record_event(None, action, "account", None, outcome, metadata)
+        except Exception as exc:  # noqa: BLE001
+            observability.capture_exception(exc, operation="api.audit")
+
+    def _send_reset_email(to: str, token: str) -> None:
+        base = os.environ.get("APP_BASE_URL", "http://localhost:3000").rstrip("/")
+        link = f"{base}/reset-password?token={token}"
+        try:
+            state.saas.email.send(
+                to=to,
+                subject="Reset your OMERO password",
+                body=(
+                    "Someone asked to reset the password for this OMERO account. "
+                    f'Choose a new password here: <a href="{link}">{link}</a>. '
+                    "This link works once and expires in 30 minutes. "
+                    "If you did not ask for this, you can ignore this email."
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            observability.capture_exception(exc, operation="api.password_reset_email")
+
+    @app.post("/auth/password/forgot", tags=["auth"])
+    async def forgot_password(body: ForgotPasswordRequest, background: BackgroundTasks) -> dict:
+        # The response body is identical whether or not the address has an
+        # account, and the slow part (sending the email) happens after the
+        # response. This endpoint is therefore not a convenient oracle, but it
+        # is not constant-time, and /auth/register still reports taken emails.
+        account = state.accounts.find_account(body.email)
+        if account is not None:
+            token = state.password_resets.issue(account.email)
+            if token is not None:
+                background.add_task(_send_reset_email, account.email, token)
+            _audit(
+                "password_reset_requested", "sent" if token else "rate_limited",
+                {"tenant_id": account.tenant_id, "user_id": account.user_id},
+            )
+        return {"sent": True}
+
+    @app.post("/auth/password/reset", tags=["auth"])
+    async def reset_password(body: ResetPasswordRequest) -> dict:
+        # Validate the new password before spending the single-use link.
+        if len(body.password) < 8:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Password must be at least 8 characters.")
+        email = state.password_resets.consume(body.token)
+        account = state.accounts.set_password(email, body.password) if email else None
+        if account is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, INVALID_RESET_LINK)
+        # Sign the account out everywhere: whoever held the old password is out.
+        revoked = state.sessions.revoke_user(account.tenant_id, account.user_id)
+        _audit(
+            "password_reset_completed", "ok",
+            {"tenant_id": account.tenant_id, "user_id": account.user_id, "sessions_revoked": revoked},
+        )
+        return {"reset": True}
 
     # ── Query ────────────────────────────────────────────────────────────
     @app.post("/query", tags=["research"])
@@ -651,8 +851,7 @@ def create_app() -> FastAPI:
             out.append({
                 "id": did, "code": f"PRJ-{did[:8].upper()}", "name": d["title"],
                 "icon": "science" if d["source_kind"] == "audio" else "description",
-                "status": "Active", "priority": "Medium", "source_kind": d["source_kind"],
-                "chunk_count": d["chunk_count"], "docs": d["chunk_count"], "updated": "Recently",
+                "source_kind": d["source_kind"], "chunk_count": d["chunk_count"],
             })
         return {"projects": out, "total": len(out)}
 
@@ -664,9 +863,8 @@ def create_app() -> FastAPI:
             did = d["document_id"]
             out.append({
                 "id": did, "name": f"ARC-{did[:8].upper()}", "title": d["title"],
-                "kind": f"{str(d['source_kind']).upper()} • AES-256", "classification": "Internal",
-                "archived": "—", "accessed": "Recently", "expiry": "7 years", "size": "—",
-                "status": "indexed",
+                "source_kind": d["source_kind"], "chunk_count": d["chunk_count"],
+                "status": d.get("status", "ready"),
             })
         return {"archives": out, "total": len(out)}
 

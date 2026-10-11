@@ -24,7 +24,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -e ".[db,observability,performance,test]"
+        run: pip install -e ".[db,observability,performance,api,saas,scale,test]"
 
       - name: Install optional ML deps for tests
         run: pip install sentence-transformers || true
@@ -34,10 +34,10 @@ jobs:
           JWT_SECRET: "ci-test-secret-${{ github.run_id }}"
           ENVIRONMENT: ci
         run: |
-          # Unit/property tests (fast, no server started)
-          python -m unittest discover -s tests -p "test_*.py" -v
-          # Integration tests (starts a real HTTP server)
-          python -m unittest discover -s tests/integration -v
+          # pytest collects every test, including the pytest-style modules
+          # that `unittest discover` silently skipped, and tests/integration
+          # (which starts a real HTTP server).
+          python -m pytest tests -q
 
   frontend-typecheck:
     name: Frontend TypeCheck + Tests

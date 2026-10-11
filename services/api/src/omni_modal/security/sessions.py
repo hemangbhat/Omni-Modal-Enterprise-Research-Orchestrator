@@ -36,6 +36,8 @@ from omni_modal.security.auth import _make_jwt, jwt_secret_from_env
 _SESS_PREFIX = "omero:rt:sess:"
 _USED_PREFIX = "omero:rt:used:"
 _FAM_PREFIX = "omero:rt:fam:"
+_PENDING_PREFIX = "omero:pending:"
+_USER_PREFIX = "omero:rt:user:"
 
 DEFAULT_ACCESS_TTL = 15 * 60          # 15 minutes
 DEFAULT_REFRESH_TTL = 30 * 24 * 3600  # 30 days
@@ -167,6 +169,9 @@ class SessionService:
         """Mint a fresh access + refresh pair for a newly-authenticated account."""
         view = _view(account)
         family_id = secrets.token_urlsafe(12)
+        # Index the family under its user so every session can be revoked at
+        # once (password reset). Refresh keeps the family, so one entry suffices.
+        self._kv.add_to_set(self._user_key(view.tenant_id, view.user_id), family_id, self._refresh_ttl)
         return self._build_response(view, family_id)
 
     def refresh(self, refresh_token: str) -> dict:
@@ -188,6 +193,14 @@ class SessionService:
         session = self._kv.get_json(_SESS_PREFIX + h)
         if session is None:
             raise RefreshTokenError("Invalid or expired refresh token.")
+
+        # Renew the per-user index entry, which would otherwise expire one
+        # refresh TTL after sign-in and leave a long-lived session out of
+        # reach of revoke_user().
+        self._kv.add_to_set(
+            self._user_key(session["tenant_id"], session["user_id"]),
+            session["family_id"], self._refresh_ttl,
+        )
 
         # Rotate: invalidate the presented token, then mint a successor.
         self._kv.put_json(_USED_PREFIX + h, {"family_id": session["family_id"]}, self._refresh_ttl)
@@ -212,6 +225,38 @@ class SessionService:
             self._kv.put_json(_USED_PREFIX + h, {"family_id": session["family_id"]}, self._refresh_ttl)
             return True
         return False
+
+    def revoke_user(self, tenant_id: str, user_id: str) -> int:
+        """Revoke every refresh-token family of a user (e.g. after a password
+        reset). Returns the number of sessions revoked. Access tokens already
+        issued stay valid until they expire (at most the access TTL)."""
+        user_key = self._user_key(tenant_id, user_id)
+        families = self._kv.members(user_key)
+        for family_id in families:
+            self._revoke_family(family_id)
+        self._kv.delete(user_key)
+        return len(families)
+
+    @staticmethod
+    def _user_key(tenant_id: str, user_id: str) -> str:
+        return f"{_USER_PREFIX}{tenant_id}:{user_id}"
+
+    # ── Short-lived pending state (e.g. MFA step-up between password + 2FA) ──
+    def stash(self, data: dict, ttl: int = 300) -> str:
+        """Store short-lived data, returning an opaque nonce to retrieve it."""
+        nonce = secrets.token_urlsafe(24)
+        self._kv.put_json(_PENDING_PREFIX + nonce, data, ttl)
+        return nonce
+
+    def unstash(self, nonce: str) -> dict | None:
+        """Retrieve and delete stashed data (single use). None if missing/expired."""
+        if not nonce:
+            return None
+        key = _PENDING_PREFIX + nonce
+        data = self._kv.get_json(key)
+        if data is not None:
+            self._kv.delete(key)
+        return data
 
     # ── internals ──────────────────────────────────────────────────────
     def _build_response(self, view: _AccountView, family_id: str) -> dict:

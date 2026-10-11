@@ -180,7 +180,7 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------------------
 
 try:
-    from hypothesis import given, settings
+    from hypothesis import HealthCheck, given, settings
     from hypothesis import strategies as st
     _HYPOTHESIS_AVAILABLE = True
 except ImportError:  # pragma: no cover
@@ -203,7 +203,10 @@ class TestExtractHostProperty(unittest.TestCase):
             max_size=50,
         ),
     )
-    @settings(max_examples=200)
+    # The first draw from these strategies can take about a second on a cold
+    # interpreter, which trips Hypothesis's input-generation timing check and
+    # made this test fail intermittently. Generation speed is not under test.
+    @settings(max_examples=200, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     def test_extract_host_strips_scheme_path_query(
         self, scheme: str, hostname: str, port: int | None, path: str
     ) -> None:

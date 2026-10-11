@@ -27,6 +27,38 @@ class LoadDotenvTests(unittest.TestCase):
     def _track(self, *keys: str) -> None:
         self._to_clear.extend(keys)
 
+    def test_test_runs_never_discover_the_developer_env_file(self) -> None:
+        # tests/_path.py and tests/conftest.py set this, so no test can pull
+        # real credentials (LLM, email, billing, storage) into the process.
+        self.assertEqual(os.environ.get("OMERO_DISABLE_DOTENV"), "1")
+
+    def test_discovery_is_skipped_when_disabled(self) -> None:
+        self._track("OMERO_DISCOVERED")
+        self.env_file.write_text("OMERO_DISCOVERED=yes" + chr(10), encoding="utf-8")
+        previous = Path.cwd()
+        os.chdir(self.dir)
+        self.addCleanup(os.chdir, previous)
+        self.assertEqual(find_dotenv(), self.env_file.resolve())
+        self.assertEqual(load_dotenv(), 0)
+        self.assertNotIn("OMERO_DISCOVERED", os.environ)
+
+    def test_discovery_loads_when_not_disabled(self) -> None:
+        self._track("OMERO_DISCOVERED")
+        self.env_file.write_text("OMERO_DISCOVERED=yes" + chr(10), encoding="utf-8")
+        previous = Path.cwd()
+        os.chdir(self.dir)
+        self.addCleanup(os.chdir, previous)
+        os.environ.pop("OMERO_DISABLE_DOTENV")
+        self.addCleanup(os.environ.__setitem__, "OMERO_DISABLE_DOTENV", "1")
+        self.assertEqual(load_dotenv(), 1)
+        self.assertEqual(os.environ["OMERO_DISCOVERED"], "yes")
+
+    def test_explicit_path_still_loads_when_discovery_is_disabled(self) -> None:
+        self._track("OMERO_EXPLICIT")
+        self.env_file.write_text("OMERO_EXPLICIT=yes" + chr(10), encoding="utf-8")
+        self.assertEqual(load_dotenv(self.env_file), 1)
+        self.assertEqual(os.environ["OMERO_EXPLICIT"], "yes")
+
     def test_loads_plain_quoted_and_export_lines(self) -> None:
         self._track("OMERO_PLAIN", "OMERO_DQ", "OMERO_SQ", "OMERO_EXPORT")
         self.env_file.write_text(

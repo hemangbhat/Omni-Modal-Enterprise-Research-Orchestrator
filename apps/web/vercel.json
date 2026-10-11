@@ -6,7 +6,7 @@
   "rewrites": [
     {
       "source": "/api/proxy/:path*",
-      "destination": "https://omero-api.onrender.com/:path*"
+      "destination": "https://omni-modal-enterprise-research.onrender.com/:path*"
     }
   ]
 }

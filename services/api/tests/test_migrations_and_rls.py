@@ -57,6 +57,17 @@ def test_real_migrations_dir_includes_rls():
     assert names.index("0001_initial.sql") < names.index("0008_rls.sql")
 
 
+def test_auth_recovery_migration_follows_rls_and_defines_both_tables():
+    migrate = _load_migrate()
+    files = migrate.discover_migrations(migrate.MIGRATIONS_DIR)
+    names = [p.name for p in files]
+    assert names.index("0008_rls.sql") < names.index("0009_auth_recovery.sql")
+    sql = next(p for p in files if p.name == "0009_auth_recovery.sql").read_text(encoding="utf-8")
+    assert "CREATE TABLE IF NOT EXISTS user_mfa" in sql
+    assert "CREATE TABLE IF NOT EXISTS password_reset_tokens" in sql
+    assert "CREATE POLICY tenant_isolation ON user_mfa" in sql
+
+
 # ── RLS helper ──────────────────────────────────────────────────────────────
 class _FakeCursor:
     def __init__(self, sink):
@@ -228,3 +239,46 @@ def test_retrieval_skips_guc_when_rls_disabled(monkeypatch):
     req = QueryRequest(tenant_id="tenant-rls", user_id="u1", question="hello", top_k=5)
     retriever.retrieve(req)
     assert not any("set_config" in sql for sql, _ in pool.conn.calls)
+
+
+# ── Baseline guard: never replay migrations over a hand-migrated database ────
+def _names(*names: str) -> list[Path]:
+    return [Path(n) for n in names]
+
+
+def test_baseline_names_cover_everything_up_to_and_including_the_target():
+    migrate = _load_migrate()
+    files = _names("0001_a.sql", "0002_b.sql", "0003_c.sql")
+    assert migrate.baseline_names(files, "0002_b.sql") == ["0001_a.sql", "0002_b.sql"]
+    assert migrate.baseline_names(files, "0003_c.sql") == ["0001_a.sql", "0002_b.sql", "0003_c.sql"]
+
+
+def test_baseline_names_rejects_an_unknown_target():
+    migrate = _load_migrate()
+    try:
+        migrate.baseline_names(_names("0001_a.sql"), "0009_missing.sql")
+    except ValueError as exc:
+        assert "0009_missing.sql" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_requires_baseline_when_tables_exist_but_no_history():
+    migrate = _load_migrate()
+    # Schema created by hand: replaying 0001.. would re-run destructive steps
+    # (0004 truncates the embeddings table), so the runner must refuse.
+    assert migrate.requires_baseline(applied=set(), existing_tables={"documents", "embeddings"})
+    assert migrate.requires_baseline(applied=set(), existing_tables={"users", "schema_migrations"})
+
+
+def test_no_baseline_needed_for_an_empty_or_tracked_database():
+    migrate = _load_migrate()
+    assert not migrate.requires_baseline(applied=set(), existing_tables=set())
+    assert not migrate.requires_baseline(applied=set(), existing_tables={"schema_migrations"})
+    assert not migrate.requires_baseline(applied={"0001_initial.sql"}, existing_tables={"documents"})
+
+
+def test_the_destructive_migration_is_still_the_reason_for_the_guard():
+    migrate = _load_migrate()
+    sql = (migrate.MIGRATIONS_DIR / "0004_embeddings_384.sql").read_text(encoding="utf-8")
+    assert "TRUNCATE TABLE embeddings" in sql

@@ -1,11 +1,14 @@
 import {
+  bigint,
   boolean,
   customType,
+  doublePrecision,
   index,
   integer,
   jsonb,
   pgEnum,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   uniqueIndex,
@@ -241,6 +244,42 @@ export const auditLogs = pgTable(
       table.resourceId
     ),
     createdAtIdx: index("audit_logs_created_at_idx").on(table.createdAt)
+  })
+);
+
+// Durable TOTP enrollment (migration 0009). `lastCounter` is the last accepted
+// 30-second time step, so a code cannot be replayed inside its window;
+// `failedAttempts` and `lockedUntil` (epoch seconds) drive the wrong-code lockout.
+export const userMfa = pgTable(
+  "user_mfa",
+  {
+    tenantId: text("tenant_id").notNull(),
+    userId: text("user_id").notNull(),
+    secret: text("secret").notNull(),
+    confirmed: boolean("confirmed").notNull().default(false),
+    lastCounter: bigint("last_counter", { mode: "number" }).notNull().default(-1),
+    failedAttempts: integer("failed_attempts").notNull().default(0),
+    lockedUntil: doublePrecision("locked_until").notNull().default(0),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.tenantId, table.userId] })
+  })
+);
+
+// Single-use password-reset links (migration 0009). Only the SHA-256 of the
+// token is stored.
+export const passwordResetTokens = pgTable(
+  "password_reset_tokens",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    email: text("email").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => ({
+    emailIdx: index("password_reset_tokens_email_idx").on(table.email, table.createdAt)
   })
 );
 

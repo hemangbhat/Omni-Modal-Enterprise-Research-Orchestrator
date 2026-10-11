@@ -5,7 +5,9 @@ import { MaterialIcon } from "@/components/material-icon";
 import { apiRequest, captureUploadError } from "@/lib/api-client";
 import { getClientApiConfig } from "@/lib/env";
 import { getActiveWorkspaceId } from "@/lib/workspace";
-import type { DocumentStatus } from "@/lib/mock-data";
+
+// Ingestion job states reported by the backend (`GET /ingest/jobs/{id}`).
+type DocumentStatus = "uploaded" | "processing" | "ready" | "failed";
 
 type UploadItem = {
   id: string;

@@ -213,7 +213,6 @@ export default function DocumentsPage() {
                     <th className="px-md py-sm font-label-md text-label-md font-medium text-on-surface-variant">Type</th>
                     <th className="px-md py-sm font-label-md text-label-md font-medium text-on-surface-variant">Chunks</th>
                     <th className="px-md py-sm font-label-md text-label-md font-medium text-on-surface-variant">Status</th>
-                    <th className="w-10 px-md py-sm" />
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-outline-variant/10 font-body-md text-body-md text-on-surface">
@@ -247,11 +246,6 @@ export default function DocumentsPage() {
                         <td className="px-md py-md font-mono-sm text-on-surface-variant">{doc.chunk_count}</td>
                         <td className="px-md py-md">
                           <StatusPill status={doc.status} />
-                        </td>
-                        <td className="px-md py-md text-right">
-                          <button className="text-on-surface-variant opacity-0 transition-all hover:text-on-surface group-hover:opacity-100">
-                            <MaterialIcon name="more_vert" size={18} />
-                          </button>
                         </td>
                       </tr>
                     );
@@ -340,7 +334,7 @@ export default function DocumentsPage() {
                       </span>
                     ))}
                     {entities.length > 12 && (
-                      <span className="cursor-pointer rounded border border-dashed border-outline-variant/40 px-sm py-1 font-mono-sm text-[11px] text-on-surface-variant hover:text-on-surface">
+                      <span className="rounded border border-dashed border-outline-variant/40 px-sm py-1 font-mono-sm text-[11px] text-on-surface-variant">
                         +{entities.length - 12} more
                       </span>
                     )}

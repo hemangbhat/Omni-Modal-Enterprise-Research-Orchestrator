@@ -11,6 +11,7 @@ import {
   type ReactNode
 } from "react";
 import {
+  clearStoredEmail,
   clearStoredRefreshToken,
   clearStoredToken,
   decodeTokenPayload,
@@ -53,6 +54,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const clearLocal = useCallback(() => {
     clearStoredToken();
     clearStoredRefreshToken();
+    clearStoredEmail();
     setToken(null);
   }, []);
 

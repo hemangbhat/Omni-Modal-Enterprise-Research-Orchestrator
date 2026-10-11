@@ -9,10 +9,6 @@ from omni_modal.mcp.server import McpServer
 from omni_modal.mcp.tools import McpToolRouter
 from omni_modal.security.document_access import DocumentAccessGuard
 
-# Honour the repository .env so DATABASE_URL is picked up when the MCP server
-# is launched directly (e.g. by an MCP client) without a pre-exported env.
-load_dotenv()
-
 
 def build_router() -> McpToolRouter:
     """Build the MCP tool router with document-level access enforcement.
@@ -42,6 +38,11 @@ def build_router() -> McpToolRouter:
 
 
 def main() -> int:
+    # Honour the repository .env so DATABASE_URL is picked up when the MCP
+    # server is launched directly (e.g. by an MCP client) without a
+    # pre-exported env. Done here, not at import, so importing this module
+    # never changes the process environment.
+    load_dotenv()
     McpServer(build_router()).serve_stdio()
     return 0
 

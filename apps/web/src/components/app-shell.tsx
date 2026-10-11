@@ -31,7 +31,13 @@ function isActiveHref(pathname: string, href: string): boolean {
   return href === "/" ? pathname === "/" : pathname.startsWith(href);
 }
 
-const PUBLIC_ROUTES = new Set(["/sign-in", "/sign-up", "/accept-invite"]);
+const PUBLIC_ROUTES = new Set([
+  "/sign-in",
+  "/sign-up",
+  "/accept-invite",
+  "/forgot-password",
+  "/reset-password"
+]);
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();

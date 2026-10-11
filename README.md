@@ -11,7 +11,7 @@ A multi-tenant enterprise research platform that ingests PDF and audio documents
 - **Observability** — Sentry distributed tracing across frontend and backend, property-based tests for correctness
 - **Enterprise security** — JWT authentication, RBAC, document-level access control, PII scrubbing, rate limiting, content redaction before external delegation
 - **Performance** — async ingestion queue, connection pooling, query result caching, batch embedding writes
-- **Test quality** — 562 backend tests (unit, HTTP integration, Hypothesis property-based) and 95 frontend tests (API clients and screen-level tests of the sign-in, two-step sign-in and password-reset screens); CI is configured to run both suites
+- **Test quality** — 567 backend tests (unit, HTTP integration, Hypothesis property-based) and 95 frontend tests (API clients and screen-level tests of the sign-in, two-step sign-in and password-reset screens); CI is configured to run both suites
 - **Works locally without a database** — a Postgres-free in-memory path wires ingestion → persistence → retrieval end-to-end so the demo runs out of the box (with a deterministic, non-semantic embedder)
 
 ---
@@ -207,7 +207,7 @@ Reset links are built from `APP_BASE_URL`, so set it to the frontend's public ad
 ### Tests
 
 ```bash
-# Backend unit, property-based and HTTP integration tests (562 tests).
+# Backend unit, property-based and HTTP integration tests (567 tests).
 # The suite never reads your .env, so it does not use your real keys or database.
 cd services/api && python -m pytest tests
 
@@ -509,7 +509,7 @@ Internal document chunks must never leave the tenant security boundary. The `Red
 - **Account security:** two-step sign-in with any authenticator app (RFC 6238 TOTP). Codes are single-use; five wrong codes lock the second step for 15 minutes; turning it on re-checks the password and an active authenticator cannot be replaced without turning it off first. Password reset by emailed link: single-use, 30-minute expiry, stored hashed, capped at 3 per address per hour, revokes every refresh token. Both persist in Postgres (`0009_auth_recovery.sql`) when `DATABASE_URL` is set and `psycopg-pool` is installed (the Docker images install it); if the database is configured but unusable, the fallback to memory is reported to Sentry and the log rather than happening silently
 - **Billing dunning:** `invoice.payment_failed` webhook notifies the org owner (in addition to checkout/subscription sync)
 - Benchmark harness (`python -m omni_modal.benchmark`, atomic JSON output)
-- 562 backend tests (unit, HTTP integration, Hypothesis property-based) and 95 frontend tests (Vitest + Testing Library). See also `docs/operations.md` for the production runbook.
+- 567 backend tests (unit, HTTP integration, Hypothesis property-based) and 95 frontend tests (Vitest + Testing Library). See also `docs/operations.md` for the production runbook.
 
 ### Not Implemented (Stubs / Interfaces Only) ⚠️
 

@@ -82,6 +82,10 @@ def load_dotenv(
     Returns:
         The number of variables applied to ``os.environ``.
     """
+    if path is None and os.environ.get("OMERO_DISABLE_DOTENV") == "1":
+        # Discovery is switched off (the test suite sets this) so the nearest
+        # .env — which holds real credentials — is never pulled in implicitly.
+        return 0
     env_path = Path(path) if path is not None else find_dotenv()
     if env_path is None or not env_path.is_file():
         return 0

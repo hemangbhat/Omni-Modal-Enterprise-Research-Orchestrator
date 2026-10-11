@@ -26,13 +26,14 @@ export function getPhaseOneComponents(): PhaseComponent[] {
     {
       name: "Whisper",
       status: "deferred",
-      description: "Local transcription interface only; model runtime is not wired."
+      description:
+        "Local Whisper transcription runs when WHISPER_MODEL_PATH is set on the backend; it is off by default."
     },
     {
       name: "Entity extraction (NER)",
       status: "ready",
       description:
-        "Rule-based extractor by default; optional pretrained Hugging Face NER model (dslim/bert-base-NER). A QLoRA fine-tuning pipeline is scaffolded but no fine-tuned weights are trained."
+        "Rule-based extractor by default; optional pretrained Hugging Face NER model (dslim/bert-base-NER). No model is fine-tuned."
     },
     {
       name: "ADK and external delegation",

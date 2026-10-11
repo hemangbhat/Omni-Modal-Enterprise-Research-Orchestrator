@@ -6,12 +6,12 @@ A multi-tenant enterprise research platform that ingests PDF and audio documents
 
 ## What This Project Demonstrates
 
-- **Full-stack architecture** — Next.js 16 App Router frontend + Python `BaseHTTPRequestHandler` backend in a monorepo
+- **Full-stack architecture** — Next.js 16 App Router frontend + Python FastAPI backend in a monorepo
 - **Vector search** — pgvector cosine-similarity retrieval with HNSW index tuning
 - **Observability** — Sentry distributed tracing across frontend and backend, property-based tests for correctness
 - **Enterprise security** — JWT authentication, RBAC, document-level access control, PII scrubbing, rate limiting, content redaction before external delegation
 - **Performance** — async ingestion queue, connection pooling, query result caching, batch embedding writes
-- **Test quality** — 306+ backend tests including 34+ Hypothesis property-based tests covering correctness invariants
+- **Test quality** — 534 backend tests (unit, HTTP integration, Hypothesis property-based) and 72 frontend tests, all run in CI
 - **Works locally without a database** — a Postgres-free in-memory path wires ingestion → persistence → retrieval end-to-end so the demo runs out of the box (with a deterministic, non-semantic embedder)
 
 ---
@@ -22,7 +22,7 @@ A multi-tenant enterprise research platform that ingests PDF and audio documents
 Browser (Next.js 16)
     │  sentry-trace + baggage + X-Correlation-ID
     ▼
-Python HTTP Backend (BaseHTTPRequestHandler)
+Python HTTP Backend (FastAPI)
     │  Rate Limiter → JWT Auth → RBAC → Input Validator
     ▼
 DeterministicAgentGraph
@@ -40,11 +40,11 @@ DeterministicAgentGraph
 | Layer | Technology |
 |-------|-----------|
 | Frontend | Next.js 16, React 19, TypeScript, Tailwind CSS |
-| Backend | Python 3.11, stdlib `http.server` |
+| Backend | Python 3.11, FastAPI (a stdlib `http.server` reference server is kept alongside) |
 | Database | PostgreSQL + pgvector extension |
 | ORM / Schema | Drizzle ORM (TypeScript) |
 | Observability | Sentry SDK (Python + `@sentry/nextjs`) |
-| Testing | Python `unittest` + Hypothesis PBT |
+| Testing | pytest + Hypothesis property-based tests; Vitest for the frontend |
 | Monorepo | npm workspaces |
 
 ---
@@ -68,14 +68,15 @@ DeterministicAgentGraph
 │       ├── benchmark/      # python -m omni_modal.benchmark
 │       ├── data_access/    # McpDataAccess protocol
 │       ├── db/             # ConnectionPool singleton
-│       ├── entity_extraction/  # QLoRA interface (stub)
+│       ├── entity_extraction/  # Rule-based extractor; optional pretrained NER model
 │       ├── ingestion/      # PDF/audio pipeline, BatchEmbedder, AsyncIngestionQueue, BackgroundWorker
 │       ├── mcp/            # MCP tool server (search_documents, get_document, search_chunks, get_entities, get_audit_logs)
 │       ├── orchestration/  # DeterministicAgentGraph, A2A client, FallbackController
 │       ├── qa/             # PgVectorChunkRetriever, QueryCache, synthesis
 │       ├── security/       # JWT auth, RBAC, document access guard, rate limiter, redactor, audit sink
 │       ├── config.py
-│       ├── main.py         # HTTP server entrypoint
+│       ├── api/            # FastAPI app (primary server): python -m omni_modal.api
+│       ├── main.py         # Stdlib reference server
 │       ├── observability.py
 │       └── retry.py
 └── docs/
@@ -99,7 +100,7 @@ This path uses the in-memory vector store (no Postgres) and the hashing embedder
 ```bash
 # 1. Install backend dependencies
 cd services/api
-pip install -e .
+pip install -e ".[api,saas]"
 cd ../..
 
 # 2. Configure your environment. Either copy the template:
@@ -108,18 +109,17 @@ cd ../..
 $env:JWT_SECRET = "$(python -c "import secrets; print(secrets.token_hex(32))")"
 
 # 3. Start the backend (auto-loads .env from the repo root)
-python -m omni_modal.main              # http://localhost:8000
+python -m omni_modal.api               # http://localhost:8000  (API docs at /docs)
 
-# 4. Issue a dev bearer token (reads the same JWT_SECRET from .env or your env)
-python scripts/issue_jwt.py --tenant demo-tenant --user u1 --roles researcher
-
-# 5. Create apps/web/.env.local with these two lines:
+# 4. Create apps/web/.env.local with this line:
 #   NEXT_PUBLIC_BACKEND_URL=http://localhost:8000
-#   NEXT_PUBLIC_API_TOKEN=<token from step 4>
 
-# 6. Start the frontend
+# 5. Start the frontend
 npm install --legacy-peer-deps
 npm run dev                            # http://localhost:3000
+
+# 6. Open http://localhost:3000/sign-up and create an account.
+#    (Development builds also accept a token from scripts/issue_jwt.py on the sign-in page.)
 ```
 
 Then open `/upload` to ingest a PDF, then `/research` to query against it.
@@ -184,18 +184,29 @@ pip install -e ".[db,observability,performance,api,saas]"
 # FastAPI (recommended): async, OpenAPI docs at http://localhost:8000/docs
 python -m omni_modal.api          # or: uvicorn omni_modal.api:app --port 8000
 
-# Stdlib reference server (zero web-framework deps), same behaviour:
+# Stdlib reference server (zero web-framework deps). It shares the domain
+# services but does not have two-step sign-in or password reset:
 python -m omni_modal.main         # HTTP server at http://localhost:8000
 ```
+
+### Account security endpoints
+
+| Endpoint | What it does |
+|---|---|
+| `POST /auth/login` | Returns a session, or `{"mfa_required": true, "mfa_token": ...}` when the account has two-step sign-in |
+| `POST /auth/mfa/login` | Completes sign-in with the challenge token and a 6-digit code |
+| `POST /auth/mfa/enroll`, `/confirm`, `/disable`, `GET /auth/mfa/status` | Turn two-step sign-in on or off for the signed-in user |
+| `POST /auth/password/forgot` | Emails a reset link. Same response whether or not the address is registered |
+| `POST /auth/password/reset` | Sets a new password from the link's token and signs the account out everywhere |
+
+Reset links are built from `APP_BASE_URL`, so set it to the frontend's public address in deployment. Without `RESEND_API_KEY` the email is only logged by the console adapter.
 
 ### Tests
 
 ```bash
-# Backend unit + property-based tests (306 tests)
-python -m unittest discover -s services/api/tests -p "test_*.py"
-
-# HTTP integration tests (starts a real server on a random port)
-python -m unittest discover -s services/api/tests/integration -v
+# Backend unit, property-based and HTTP integration tests (534 tests).
+# The suite never reads your .env, so it cannot touch real services.
+cd services/api && python -m pytest tests
 
 # Frontend unit tests (Vitest — real assertions, not stubs)
 npm run test:frontend
@@ -257,7 +268,7 @@ All variables are sourced from actual code — nothing is invented. See `.env.ex
 | `A2A_DELEGATION_ENDPOINT` | Optional | — | External A2A endpoint URL. Unset = delegation disabled. | External |
 | `GEMINI_INTERACTIONS_ENDPOINT` | Optional | — | Alias for `A2A_DELEGATION_ENDPOINT` | External |
 | `WHISPER_MODEL_PATH` | Optional | `base` | Whisper model size (`tiny`/`base`/`small`/`medium`) or path. Activates audio transcription. | Free, local |
-| `QLORA_ENTITY_MODEL_PATH` | Optional | `dslim/bert-base-NER` | HuggingFace NER model ID. Set to empty for rule-based only. | Free, local (~420 MB) |
+| `ENTITY_NER_MODEL_PATH` | Optional | `dslim/bert-base-NER` | Pretrained Hugging Face NER model ID (legacy alias: `QLORA_ENTITY_MODEL_PATH`). Set to empty for rule-based only. | Free, local (~420 MB) |
 | `ADK_PROJECT_ID` | Optional | `omero-local-dev` | Deployment identifier in health/observability | Local |
 
 ### Frontend (Next.js — `apps/web/.env.local`)
@@ -265,7 +276,7 @@ All variables are sourced from actual code — nothing is invented. See `.env.ex
 | Variable | Required? | Default | Purpose |
 |---|---|---|---|
 | `NEXT_PUBLIC_BACKEND_URL` | Optional | `http://localhost:8000` | Backend origin the browser calls |
-| `NEXT_PUBLIC_API_TOKEN` | Required for browser UI | — | Dev bearer token. Generate: `python scripts/issue_jwt.py` |
+| `NEXT_PUBLIC_API_TOKEN` | Optional, development only | — | Dev bearer token for one-click sign-in. Hidden in production builds; sign in with email and password instead. Generate: `python scripts/issue_jwt.py` |
 | `NEXT_PUBLIC_SENTRY_DSN` | Optional | — | Frontend Sentry DSN. Unset = Sentry disabled. Set to the same DSN as `SENTRY_DSN`. |
 | `NEXT_PUBLIC_SENTRY_ENVIRONMENT` | Optional | `development` | Sentry environment tag |
 | `NEXT_PUBLIC_APP_NAME` | Optional | `Omni-Modal Enterprise Research Orchestrator` | Browser tab title |
@@ -392,8 +403,8 @@ Check that the file is a PDF or WAV/MP3. MIME sniffing rejects unrecognized type
 **Research returns "no data" after upload**
 Ingestion runs asynchronously — wait until the upload queue shows "ready" status before querying. Poll `GET /ingest/jobs/:id` or refresh the upload page.
 
-**NEXT_PUBLIC_API_TOKEN is not set**
-Run `python scripts/issue_jwt.py --tenant demo-tenant --user u1 --roles researcher,admin` and paste the token into `apps/web/.env.local` as `NEXT_PUBLIC_API_TOKEN=<token>`.
+**Cannot sign in locally**
+Create an account on `/sign-up` (email and password). In development builds you can also sign in with a token: run `python scripts/issue_jwt.py --tenant demo-tenant --user u1 --roles researcher,admin` and paste it on the sign-in page, or set it as `NEXT_PUBLIC_API_TOKEN` in `apps/web/.env.local`.
 
 **dslim/bert-base-NER download fails**
 Run `python scripts/download_models.py` to pre-fetch models with better error output. If behind a proxy, set `TRANSFORMERS_OFFLINE=1` and download manually.
@@ -424,7 +435,7 @@ Or connect the GitHub repo to Vercel for automatic deploys on push.
 
 - Replace `InMemoryAuditSink` with a PostgreSQL-backed sink (the `audit_logs` table exists and is ready)
 - The rate limiter, query cache, and ingestion queue are **Redis-backed when `REDIS_URL` is set** (shared across instances → stateless, horizontally-scalable web tier); they fall back to in-process implementations when it is unset
-- Auth uses **short-lived access tokens + rotating refresh tokens** with server-side revocation and reuse detection (`/auth/refresh`, `/auth/logout`); the refresh store is Redis-backed when `REDIS_URL` is set. Still on the roadmap: httpOnly-cookie storage (tokens are in `localStorage` today), social OAuth, email verification, and MFA
+- Auth uses **short-lived access tokens + rotating refresh tokens** with server-side revocation and reuse detection (`/auth/refresh`, `/auth/logout`), optional **two-step sign-in (TOTP)**, and **password reset by email**. The refresh store is Redis-backed when `REDIS_URL` is set; without Redis it is in-process, so a restart signs users out. Still on the roadmap: httpOnly-cookie storage (tokens are in `localStorage` today), social OAuth, and email verification
 - For a dedicated worker tier, run `python -m omni_modal.ingestion.redis_worker` as a separate process and set `INGEST_WORKER_IN_PROCESS=false` on the web service (see `render.yaml`)
 
 ---
@@ -433,7 +444,7 @@ Or connect the GitHub repo to Vercel for automatic deploys on push.
 
 **Backend HTTP layer — FastAPI (primary) with a stdlib fallback**
 
-The backend runs on **FastAPI** (`omni_modal.api`, run with `python -m omni_modal.api` or `uvicorn omni_modal.api:app`): async handlers, Pydantic request validation, a JWT auth dependency, RBAC, usage metering/plan gating, and auto-generated OpenAPI docs at `/docs` (28 routes). It covers the full surface — auth (register/login), query + SSE streaming, ingestion (upload/local/job-status), documents/projects/archives/entities, and the entire SaaS layer (workspaces, usage, billing incl. Stripe checkout/portal/webhook, members/invites, plans, admin, notifications) — and is covered by `TestClient` tests in `tests/test_fastapi_app.py`. The original stdlib `http.server` implementation (`omni_modal.main`) remains as a dependency-free reference that shares all the same domain services, so behaviour is identical across both.
+The backend runs on **FastAPI** (`omni_modal.api`, run with `python -m omni_modal.api` or `uvicorn omni_modal.api:app`): async handlers, Pydantic request validation, a JWT auth dependency, RBAC, usage metering/plan gating, and auto-generated OpenAPI docs at `/docs` (28 routes). It covers the full surface — auth (register/login), query + SSE streaming, ingestion (upload/local/job-status), documents/projects/archives/entities, and the entire SaaS layer (workspaces, usage, billing incl. Stripe checkout/portal/webhook, members/invites, plans, admin, notifications) — and is covered by `TestClient` tests in `tests/test_fastapi_app.py`. The original stdlib `http.server` implementation (`omni_modal.main`) remains as a dependency-free reference that shares the same domain services; newer endpoints (two-step sign-in, password reset) exist only in the FastAPI app.
 
 **Why Hypothesis property-based testing?**
 Unit tests catch known cases; property tests find unknown edge cases. The 34+ PBT tests cover correctness invariants: JWT round-trips, PII scrubbing completeness, rate limiter window boundaries, batch partitioning, cache eviction, etc.
@@ -442,7 +453,7 @@ Unit tests catch known cases; property tests find unknown edge cases. The 34+ PB
 For horizontal scaling, the rate-limit counters, query cache, and ingestion queue must be shared state — otherwise every web instance has its own and the "scalable SaaS" claim breaks down. When `REDIS_URL` is set, all three move to Redis: a sliding-window limiter (sorted sets), a shared TTL cache, and a durable job queue with retries + dead-letter and a separable worker tier (`python -m omni_modal.ingestion.redis_worker`). Each component is injected via the constructor and degrades to its in-process implementation when Redis is absent or unreachable, so the offline/demo path keeps working with zero configuration. Tested end-to-end with `fakeredis` (no live server required).
 
 **Why short-lived access tokens + rotating refresh tokens?**
-A single long-lived JWT can't be revoked if it leaks. The auth flow issues a short-lived access token (default 15 min, `ACCESS_TOKEN_TTL_SECONDS`) plus a long-lived, server-stored refresh token (default 30 days). `/auth/refresh` rotates the refresh token on every use and invalidates the previous one; replaying a rotated token triggers **reuse detection** that revokes the whole token family (theft mitigation). `/auth/logout` revokes immediately. Only SHA-256 hashes of refresh tokens are stored, in Redis (shared + revocable across instances) when `REDIS_URL` is set, else in-process. The browser renews silently before expiry. Remaining hardening (httpOnly cookies, OAuth, email verification, MFA) is documented as roadmap, not claimed as done.
+A single long-lived JWT can't be revoked if it leaks. The auth flow issues a short-lived access token (default 15 min, `ACCESS_TOKEN_TTL_SECONDS`) plus a long-lived, server-stored refresh token (default 30 days). `/auth/refresh` rotates the refresh token on every use and invalidates the previous one; replaying a rotated token triggers **reuse detection** that revokes the whole token family (theft mitigation). `/auth/logout` revokes immediately. Only SHA-256 hashes of refresh tokens are stored, in Redis (shared + revocable across instances) when `REDIS_URL` is set, else in-process. The browser renews silently before expiry. Remaining hardening (httpOnly cookies, OAuth, email verification) is documented as roadmap, not claimed as done.
 
 **Why content redaction before A2A delegation?**
 Internal document chunks must never leave the tenant security boundary. The `Redactor` intercepts delegation payloads, truncates `internal_status` to 500 chars, replaces chunk fingerprints with `[REDACTED]`, and raises `ContentLeakError` if verbatim chunk content is detected in the question field.
@@ -476,23 +487,39 @@ Internal document chunks must never leave the tenant security boundary. The `Red
 - **Auth lifecycle:** short-lived access JWTs + rotating refresh tokens with reuse detection and server-side revocation (`/auth/refresh`, `/auth/logout`); refresh store is Redis-backed when configured; frontend renews silently
 - **Observability:** Prometheus metrics at `/metrics`, readiness probe at `/health/ready`, structured JSON access logs, and end-to-end `X-Correlation-ID` propagation
 - **Data hardening:** idempotent migration runner (`scripts/migrate.py` + `schema_migrations`) and Postgres Row-Level Security policies (`0008_rls.sql`) for database-enforced tenant isolation
+- **Account security:** two-step sign-in with any authenticator app (RFC 6238 TOTP; codes are single-use and five wrong codes end the login attempt) and password reset by emailed link (single-use, 30-minute expiry, stored hashed, capped at 3 per address per hour, revokes every session). Both persist in Postgres (`0009_auth_recovery.sql`) when `DATABASE_URL` is set
 - **Billing dunning:** `invoice.payment_failed` webhook notifies the org owner (in addition to checkout/subscription sync)
 - Benchmark harness (`python -m omni_modal.benchmark`, atomic JSON output)
-- 470+ backend tests: unit, integration, Hypothesis property-based; 26 frontend tests (Vitest). See also `docs/operations.md` for the production runbook.
+- 534 backend tests (unit, HTTP integration, Hypothesis property-based) and 72 frontend tests (Vitest). See also `docs/operations.md` for the production runbook.
 
 ### Not Implemented (Stubs / Interfaces Only) ⚠️
 
 - **Whisper transcription** — `LocalWhisperTranscriber` is wired. Set `WHISPER_MODEL_PATH=base` (or any model size) to activate. Requires Whisper CLI on PATH (`pip install openai-whisper`).
-- **Entity extraction** — `EntityExtractionService` runs automatically post-ingestion. Rule-based by default; set `QLORA_ENTITY_MODEL_PATH=dslim/bert-base-NER` for real HF NER (free, ~420 MB). Entities are exposed via `GET /entities/:document_id`.
+- **Entity extraction** — `EntityExtractionService` runs automatically post-ingestion. Rule-based by default; set `ENTITY_NER_MODEL_PATH=dslim/bert-base-NER` for a pretrained Hugging Face NER model (free, ~420 MB). Entities are exposed via `GET /entities/:document_id`. No model in this project is fine-tuned.
 - **Semantic embeddings are pluggable** — `EMBEDDING_BACKEND` selects `hashing` (deterministic offline fallback, 1536-dim), `openai` (real, 1536-dim), or `sentence-transformers` (real local, default model `BAAI/bge-small-en-v1.5`, 384-dim, with automatic bge/e5 query prefixing). The offline demo defaults to hashing so it needs no keys.
 - **pgvector ingestion persistence — wired end-to-end.** When `DATABASE_URL` is set, ingestion persists `documents → document_chunks → embeddings(vector)` via `PostgresChunkPersistence`, and the `PgVectorChunkRetriever` performs real cosine/HNSW semantic search over that content. Verified on Neon (a relevant chunk ranks top). The `embeddings` column is `vector(384)` after migration `0004_embeddings_384.sql` to match the local model; use a 1536-dim model + the original column if you prefer OpenAI. The in-memory path remains the offline fallback when `DATABASE_URL` is unset.
 - **Measured retrieval quality** — on a 16-query internal paraphrase eval set (`python -m omni_modal.benchmark.retrieval_eval` against a populated Neon DB), the `BAAI/bge-small-en-v1.5` (384-dim) + pgvector/HNSW path scores **recall@1 = 0.875, recall@5 = 0.938, MRR = 0.906**, versus the deterministic hashing baseline's recall@1 = 0.40. This is a small internal set (not a public benchmark like BEIR/MTEB), so treat it as an indicative sanity check, not a leaderboard score. Re-run the eval to reproduce.
-- **QLoRA entity extraction** — there is **no trained QLoRA model**. `ENTITY_NER_MODEL_PATH` (legacy alias `QLORA_ENTITY_MODEL_PATH`) loads a *pretrained* HF NER model (`dslim/bert-base-NER`); a QLoRA training pipeline is scaffolded but produces no fine-tuned weights. Rule-based extraction is the default.
 - **Live A2A / Gemini delegation** — `HttpA2AResearchClient` implements the JSON-RPC protocol correctly but requires a real endpoint URL. `DisabledExternalResearchClient` is used by default.
 - **Persistent audit log** — `PostgresAuditSink` writes all security/observability events to the `audit_events` table (migration `0007`, bigserial id, jsonb metadata). Wired into both the stdlib server and the FastAPI app via `select_audit_sink()`. Verified on Neon: tool calls, auth events, and system events persist and survive restart. The original Drizzle `audit_logs` table (compliance enum path) is kept for structured compliance exports.
 - **Frontend authentication UI** — `middleware.ts` is a pass-through; there is a `/sign-in` + `/sign-up` page with real email+password auth. JWT is enforced at the backend API level.
-- **Session management** — implemented: short-lived access JWTs (default 15 min) + rotating refresh tokens with server-side revocation and reuse detection; the browser renews silently and revokes on sign-out. Tokens are stored in `localStorage` today — httpOnly-cookie storage, social OAuth, email verification, and MFA remain roadmap.
+- **Session management** — implemented: short-lived access JWTs (default 15 min) + rotating refresh tokens with server-side revocation and reuse detection; the browser renews silently and revokes on sign-out. Tokens are stored in `localStorage` today — httpOnly-cookie storage, social OAuth, and email verification remain roadmap.
 - **Live database for most tests** — DB-dependent tests use mocks. Integration tests against a real pgvector instance require `DATABASE_URL` to be set.
+
+---
+
+## Known gaps against the product vision
+
+Audited on 2026-10-11 against the target product description. These are not built yet; the plan and order are in `docs/superpowers/specs/2026-10-11-omero-completion-design.md`.
+
+- **Research:** answers are generated in full and then sent in pieces, so streaming is simulated. Each question is independent (no follow-ups). Query history lives only in the browser. There is no full-text or hybrid search and no reranker. Citations show a chunk index, not the page number or audio timestamp that ingestion already captures.
+- **Uploads:** files are sent as base64 inside a JSON request and written to a temp directory. The S3 adapter exists but the upload route does not use it. Ingestion job state lives in Redis or memory, not Postgres. There is no delete, reprocess, download or duplicate detection.
+- **Projects and archives:** there is no projects table and no archive action. The Projects and Archives pages each list one row per indexed document.
+- **External research:** the delegation client is generic and off unless an endpoint is configured; no provider is wired.
+- **Billing:** no pricing page and no billing history view.
+- **Operations:** no view of failed ingestion jobs; the readiness probe does not check storage or the model provider; backup and recovery are not documented.
+- **Deployment:** the Render free tier runs the hashing embedder, which is not semantic, and cannot run Whisper, so audio transcription does not work there.
+- **Frontend:** no browser end-to-end test. `npm run lint` is broken (`next lint` was removed in Next.js 16).
+- **Migration 0009** and the Postgres-backed MFA and reset-token stores are covered by in-memory tests only; they have not been run against a live database.
 
 ---
 

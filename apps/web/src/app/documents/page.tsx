@@ -6,6 +6,7 @@ import { MaterialIcon } from "@/components/material-icon";
 import { apiRequest } from "@/lib/api-client";
 import { getClientApiConfig } from "@/lib/env";
 import {
+  archiveDocument,
   deleteDocument,
   downloadDocument,
   formatBytes,
@@ -26,7 +27,10 @@ type LiveDoc = {
   size_bytes?: number;
   created_at?: number;
   error_message?: string | null;
+  projects?: { id: string; name: string }[];
 };
+
+const PAGE_SIZE = 25;
 
 function formatDate(epochSeconds?: number): string {
   if (!epochSeconds) return "—";
@@ -94,14 +98,36 @@ export default function DocumentsPage() {
   const [entities, setEntities] = useState<EntityRecord[]>([]);
   const [entitiesLoading, setEntitiesLoading] = useState(false);
   const [search, setSearch] = useState("");
+  const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [kindFilter, setKindFilter] = useState("");
+  const [sort, setSort] = useState("newest");
+  const [mine, setMine] = useState(false);
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
   const [inspectorOpen, setInspectorOpen] = useState(false);
 
-  // Seed the filter from a ?q= query param (set by the top-bar search).
+  // Seed filters from the address (?q= from the top-bar search, ?status= from the dashboard).
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const q = new URLSearchParams(window.location.search).get("q");
-    if (q) setSearch(q);
+    const params = new URLSearchParams(window.location.search);
+    const q = params.get("q");
+    if (q) {
+      setSearch(q);
+      setQuery(q);
+    }
+    const status = params.get("status");
+    if (status) setStatusFilter(status);
   }, []);
+
+  // Search on the server as the user types, after a short pause.
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setQuery(search.trim());
+      setPage(1);
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [search]);
 
   const { baseUrl, token } = getClientApiConfig();
   const headers: Record<string, string> = {};
@@ -114,10 +140,16 @@ export default function DocumentsPage() {
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
     try {
-      const r = await apiRequest(withWorkspaceQuery("/documents"), { method: "GET", headers }, { baseUrl });
+      const params = new URLSearchParams({ sort, page: String(page), page_size: String(PAGE_SIZE) });
+      if (query) params.set("q", query);
+      if (statusFilter) params.set("status", statusFilter);
+      if (kindFilter) params.set("kind", kindFilter);
+      if (mine) params.set("mine", "true");
+      const r = await apiRequest(withWorkspaceQuery(`/documents?${params}`), { method: "GET", headers }, { baseUrl });
       if (!r.ok) throw new Error(`The document list could not be loaded (HTTP ${r.status}).`);
-      const data = (await r.json()) as { documents: LiveDoc[] };
+      const data = (await r.json()) as { documents: LiveDoc[]; total?: number };
       setDocs(data.documents ?? []);
+      setTotal(data.total ?? (data.documents ?? []).length);
       setError(null);
     } catch (err) {
       if (!quiet) setError(err instanceof Error ? err.message : "The document list could not be loaded.");
@@ -126,7 +158,7 @@ export default function DocumentsPage() {
     }
     // headers/baseUrl come from the signed-in session and do not change while mounted.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [query, statusFilter, kindFilter, sort, mine, page]);
 
   useEffect(() => {
     void load();
@@ -182,9 +214,9 @@ export default function DocumentsPage() {
   }
 
   const selected = docs.find((d) => d.document_id === selectedId);
-  const filtered = docs.filter((d) =>
-    !search || d.title.toLowerCase().includes(search.toLowerCase())
-  );
+  const filtered = docs;
+  const filtering = Boolean(query || statusFilter || kindFilter || mine);
+  const lastPage = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   return (
     <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-surface">
@@ -202,7 +234,9 @@ export default function DocumentsPage() {
           <p className="mt-sm max-w-2xl font-body-md text-body-md text-on-surface-variant">
             {loading
               ? "Loading documents…"
-              : `${filtered.length} document${filtered.length !== 1 ? "s" : ""} in your knowledge base.`}
+              : filtering
+                ? `${total} matching document${total !== 1 ? "s" : ""}.`
+                : `${total} document${total !== 1 ? "s" : ""} in your library. Archived documents are on the Archives page.`}
           </p>
         </div>
         <div className="flex items-center gap-md">
@@ -210,7 +244,8 @@ export default function DocumentsPage() {
             <MaterialIcon name="search" size={18} className="absolute left-sm top-1/2 -translate-y-1/2 text-on-surface-variant" />
             <input
               type="text"
-              placeholder="Search documents…"
+              aria-label="Search document titles and file names"
+              placeholder="Search titles and file names…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="w-64 rounded-lg border border-outline-variant/30 bg-surface-container-lowest py-sm pl-xl pr-md font-body-md text-body-md text-on-surface shadow-[inset_0_2px_4px_rgba(0,0,0,0.2)] transition-all placeholder:text-on-surface-variant/50 focus:border-primary-fixed-dim focus:outline-none focus:ring-1 focus:ring-primary-fixed-dim"
@@ -224,6 +259,67 @@ export default function DocumentsPage() {
             Upload
           </Link>
         </div>
+      </div>
+
+      {/* Filters */}
+      <div className="relative z-10 flex flex-wrap items-center gap-sm border-b border-outline-variant/10 px-xl py-sm text-[14px]">
+        <label className="sr-only" htmlFor="filter-status">Status</label>
+        <select
+          id="filter-status"
+          value={statusFilter}
+          onChange={(e) => {
+            setStatusFilter(e.target.value);
+            setPage(1);
+          }}
+          className="rounded-lg border border-outline-variant/40 bg-surface px-sm py-xs text-on-surface"
+        >
+          <option value="">Any status</option>
+          <option value="ready">Ready</option>
+          <option value="processing">Processing</option>
+          <option value="uploaded">Waiting</option>
+          <option value="failed">Failed</option>
+        </select>
+        <label className="sr-only" htmlFor="filter-kind">Type</label>
+        <select
+          id="filter-kind"
+          value={kindFilter}
+          onChange={(e) => {
+            setKindFilter(e.target.value);
+            setPage(1);
+          }}
+          className="rounded-lg border border-outline-variant/40 bg-surface px-sm py-xs text-on-surface"
+        >
+          <option value="">PDF and audio</option>
+          <option value="pdf">PDF</option>
+          <option value="audio">Audio</option>
+        </select>
+        <label className="sr-only" htmlFor="filter-sort">Sort</label>
+        <select
+          id="filter-sort"
+          value={sort}
+          onChange={(e) => {
+            setSort(e.target.value);
+            setPage(1);
+          }}
+          className="rounded-lg border border-outline-variant/40 bg-surface px-sm py-xs text-on-surface"
+        >
+          <option value="newest">Newest first</option>
+          <option value="oldest">Oldest first</option>
+          <option value="title">Title A to Z</option>
+          <option value="size">Largest first</option>
+        </select>
+        <label className="flex items-center gap-xs text-on-surface-variant">
+          <input
+            type="checkbox"
+            checked={mine}
+            onChange={(e) => {
+              setMine(e.target.checked);
+              setPage(1);
+            }}
+            className="accent-primary-fixed-dim"
+          />
+          Uploaded by me
+        </label>
       </div>
 
       {/* Workspace */}
@@ -327,6 +423,31 @@ export default function DocumentsPage() {
                   })}
                 </tbody>
               </table>
+              {total > PAGE_SIZE ? (
+                <nav aria-label="Pages" className="flex items-center justify-between border-t border-outline-variant/20 px-md py-sm text-[14px] text-on-surface-variant">
+                  <span>
+                    {(page - 1) * PAGE_SIZE + 1} to {Math.min(page * PAGE_SIZE, total)} of {total}
+                  </span>
+                  <span className="flex gap-sm">
+                    <button
+                      type="button"
+                      disabled={page <= 1}
+                      onClick={() => setPage((n) => Math.max(1, n - 1))}
+                      className="rounded-lg border border-outline-variant/40 px-md py-xs text-on-surface disabled:opacity-40"
+                    >
+                      Previous
+                    </button>
+                    <button
+                      type="button"
+                      disabled={page >= lastPage}
+                      onClick={() => setPage((n) => Math.min(lastPage, n + 1))}
+                      className="rounded-lg border border-outline-variant/40 px-md py-xs text-on-surface disabled:opacity-40"
+                    >
+                      Next
+                    </button>
+                  </span>
+                </nav>
+              ) : null}
             </div>
           )}
         </div>
@@ -393,6 +514,24 @@ export default function DocumentsPage() {
                     </button>
                   </div>
                 ) : null}
+                {selected.size_bytes ? (
+                  <button
+                    type="button"
+                    disabled={busyAction !== null}
+                    onClick={() =>
+                      void runAction("archive", async () => {
+                        await archiveDocument(selected.document_id);
+                        setInspectorOpen(false);
+                        setSelectedId(null);
+                        await load(true);
+                      })
+                    }
+                    className="flex items-center justify-center gap-xs rounded-lg py-sm text-[13px] text-on-surface-variant hover:text-on-surface disabled:opacity-50"
+                  >
+                    <MaterialIcon name="inventory_2" size={16} />
+                    {busyAction === "archive" ? "Archiving…" : "Archive (hide from research)"}
+                  </button>
+                ) : null}
                 {confirmDelete ? (
                   <div className="rounded-lg border border-error/30 bg-error-container/10 p-sm text-[13px]">
                     <p className="mb-sm text-on-surface">
@@ -450,6 +589,9 @@ export default function DocumentsPage() {
                   {selected.size_bytes ? <MetaRow label="Size" value={formatBytes(selected.size_bytes)} /> : null}
                   {selected.created_at ? <MetaRow label="Added" value={formatDate(selected.created_at)} /> : null}
                   <MetaRow label="Passages" value={String(selected.chunk_count)} />
+                  {selected.projects && selected.projects.length > 0 ? (
+                    <MetaRow label="Projects" value={selected.projects.map((pr) => pr.name).join(", ")} />
+                  ) : null}
                   <div className="flex items-center justify-between">
                     <span className="font-label-md text-label-md text-on-surface-variant">Status</span>
                     <StatusPill status={selected.status} />

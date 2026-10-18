@@ -93,6 +93,47 @@ class JobRecord:
         return {**asdict(self), "job_id": self.id, "status": document_status_for(self.stage)}
 
 
+@dataclass(frozen=True)
+class DocumentQuery:
+    """Filters, sort and page for the document library."""
+
+    text: str = ""
+    status: str | None = None          # uploaded | processing | ready | failed
+    source_kind: str | None = None     # pdf | audio
+    uploaded_by: str | None = None
+    archived: bool = False             # False: live documents; True: the archive
+    document_ids: frozenset[str] | None = None  # e.g. one project's documents
+    sort: str = "newest"               # newest | oldest | title | size
+    page: int = 1
+    page_size: int = 25
+
+
+SORTS = ("newest", "oldest", "title", "size")
+
+
+def _matches(d: "DocumentRecord", q: DocumentQuery) -> bool:
+    if (d.archived_at is not None) != q.archived:
+        return False
+    if q.status and d.status != q.status:
+        return False
+    if q.source_kind and d.source_kind != q.source_kind:
+        return False
+    if q.uploaded_by and d.uploaded_by != q.uploaded_by:
+        return False
+    if q.document_ids is not None and d.id not in q.document_ids:
+        return False
+    text = q.text.strip().lower()
+    return not text or text in d.title.lower() or text in (d.file_name or "").lower()
+
+
+_SORT_KEYS = {
+    "newest": (lambda d: d.created_at, True),
+    "oldest": (lambda d: d.created_at, False),
+    "title": (lambda d: d.title.lower(), False),
+    "size": (lambda d: d.size_bytes, True),
+}
+
+
 class InMemoryDocumentStore:
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -128,6 +169,14 @@ class InMemoryDocumentStore:
         with self._lock:
             docs = [d for d in self._docs.values() if d.tenant_id == tenant_id]
         return sorted(docs, key=lambda d: d.created_at, reverse=True)
+
+    def query_documents(self, tenant_id: str, q: DocumentQuery) -> tuple[list[DocumentRecord], int]:
+        with self._lock:
+            docs = [d for d in self._docs.values() if d.tenant_id == tenant_id and _matches(d, q)]
+        key, reverse = _SORT_KEYS.get(q.sort, _SORT_KEYS["newest"])
+        docs.sort(key=key, reverse=reverse)
+        start = (q.page - 1) * q.page_size
+        return docs[start:start + q.page_size], len(docs)
 
     def update_document(self, tenant_id: str, document_id: str, **fields) -> DocumentRecord:
         with self._lock:
@@ -278,6 +327,45 @@ class PostgresDocumentStore:
                 (tenant_id,),
             )
             return [self._doc(r) for r in cur.fetchall()]
+
+    _ORDER = {
+        "newest": "d.created_at DESC, d.id",
+        "oldest": "d.created_at ASC, d.id",
+        "title": "lower(d.title) ASC, d.id",
+        "size": "COALESCE(d.size_bytes, 0) DESC, d.id",
+    }
+
+    def query_documents(self, tenant_id: str, q: DocumentQuery) -> tuple[list[DocumentRecord], int]:
+        where = ["d.tenant_id = %s", "(d.archived_at IS NOT NULL) = %s"]
+        params: list = [tenant_id, q.archived]
+        if q.status:
+            where.append("d.status::text = %s")
+            params.append(q.status)
+        if q.source_kind:
+            where.append("d.source_type::text = %s")
+            params.append(q.source_kind)
+        if q.uploaded_by:
+            where.append("d.uploaded_by = %s")
+            params.append(q.uploaded_by)
+        if q.document_ids is not None:
+            where.append("d.id::text = ANY(%s)")
+            params.append(list(q.document_ids))
+        if q.text.strip():
+            # Escape LIKE wildcards so a search for "100%" means the text "100%".
+            pattern = "%" + q.text.strip().lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            where.append("(lower(d.title) LIKE %s OR lower(COALESCE(d.file_name, '')) LIKE %s)")
+            params += [pattern, pattern]
+        clause = " AND ".join(where)
+        order = self._ORDER.get(q.sort, self._ORDER["newest"])
+        with self._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(f"SELECT count(*) FROM documents d WHERE {clause}", tuple(params))
+            total = int(cur.fetchone()[0])
+            cur.execute(
+                f"SELECT {_DOC_COLUMNS} FROM documents d WHERE {clause} ORDER BY {order} LIMIT %s OFFSET %s",
+                (*params, q.page_size, (q.page - 1) * q.page_size),
+            )
+            rows = cur.fetchall()
+        return [self._doc(r) for r in rows], total
 
     _UPDATABLE = {"status", "error_message", "processed_at", "title", "archived_at"}
 

@@ -28,6 +28,8 @@ from pathlib import Path
 
 from omni_modal.documents.store import (
     ACTIVE_STAGES,
+    SORTS,
+    DocumentQuery,
     DocumentNotFound,
     DocumentRecord,
     DuplicateDocument,
@@ -423,6 +425,38 @@ class DocumentService:
 
     def list(self, tenant_id: str) -> list[DocumentRecord]:
         return self._store.list_documents(tenant_id)
+
+    def query(self, tenant_id: str, query: DocumentQuery) -> tuple[list[DocumentRecord], int]:
+        """One page of the tenant's documents matching ``query``, and the total match count."""
+        if query.sort not in SORTS:
+            raise UploadRejected(f"sort must be one of: {', '.join(SORTS)}.")
+        page_size = max(1, min(query.page_size, 200))
+        page = max(1, query.page)
+        return self._store.query_documents(
+            tenant_id, DocumentQuery(**{**query.__dict__, "page": page, "page_size": page_size, "text": query.text[:200]})
+        )
+
+    def archive(self, tenant_id: str, user_id: str, roles, document_id: str) -> DocumentRecord:
+        """Hide a document from research and the library until restored."""
+        doc = self._store.get_document(tenant_id, document_id)
+        self._may_change(doc, user_id, roles)
+        updated = self._store.update_document(tenant_id, document_id, archived_at=time.time())
+        if self._evict:
+            self._evict(tenant_id)  # cached answers may cite it
+        return updated
+
+    def restore(self, tenant_id: str, user_id: str, roles, document_id: str) -> DocumentRecord:
+        doc = self._store.get_document(tenant_id, document_id)
+        self._may_change(doc, user_id, roles)
+        updated = self._store.update_document(tenant_id, document_id, archived_at=None)
+        if self._evict:
+            self._evict(tenant_id)
+        return updated
+
+    def failures(self, tenant_id: str) -> list[tuple[DocumentRecord, JobRecord | None]]:
+        """Failed documents with their last job, for the admin view."""
+        docs, _ = self._store.query_documents(tenant_id, DocumentQuery(status="failed", page_size=200))
+        return [(d, self._store.latest_job(tenant_id, d.id)) for d in docs]
 
     @staticmethod
     def _may_change(doc: DocumentRecord, user_id: str, roles) -> None:

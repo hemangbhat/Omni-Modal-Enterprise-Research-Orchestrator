@@ -70,6 +70,10 @@ class DemoBillingAdapter:
     def confirm_checkout(self, session_id: str) -> CheckoutResult:  # noqa: ARG002
         raise RuntimeError("Demo billing does not support Stripe checkout.")
 
+    def list_invoices(self, customer_id: str | None, limit: int = 24) -> list[dict] | None:  # noqa: ARG002
+        """Demo billing keeps no invoices: None means "not available", not "none"."""
+        return None
+
     def create_portal_session(self, **_: object) -> PortalSession:
         raise RuntimeError("Demo billing does not support the Stripe portal.")
 
@@ -173,10 +177,35 @@ class StripeBillingAdapter:
         )
         return PortalSession(url=session.url)
 
+    # ── Invoices ─────────────────────────────────────────────────────────
+    def list_invoices(self, customer_id: str | None, limit: int = 24) -> list[dict] | None:
+        if not customer_id:
+            return []
+        invoices = stripe.Invoice.list(customer=customer_id, limit=max(1, min(limit, 100)))
+        return [
+            {
+                "id": inv.get("id"),
+                "number": inv.get("number"),
+                "status": inv.get("status"),
+                "currency": inv.get("currency"),
+                "amount_due": inv.get("amount_due"),
+                "amount_paid": inv.get("amount_paid"),
+                "created": inv.get("created"),
+                "period_start": inv.get("period_start"),
+                "period_end": inv.get("period_end"),
+                "hosted_invoice_url": inv.get("hosted_invoice_url"),
+                "invoice_pdf": inv.get("invoice_pdf"),
+            }
+            for inv in invoices.get("data", [])
+        ]
+
     # ── Webhooks ─────────────────────────────────────────────────────────
     def verify_webhook(self, payload: bytes, sig_header: str) -> dict:
         if not self._webhook_secret:
-            # No secret configured: parse without verification (dev only).
+            # Without the signing secret anyone could post a fake "paid" event,
+            # so unverified events are refused unless explicitly allowed (dev only).
+            if os.environ.get("OMERO_ALLOW_UNVERIFIED_WEBHOOKS", "false").lower() != "true":
+                raise ValueError("STRIPE_WEBHOOK_SECRET is not set, so webhook events cannot be verified.")
             import json  # noqa: PLC0415
 
             return json.loads(payload.decode("utf-8"))

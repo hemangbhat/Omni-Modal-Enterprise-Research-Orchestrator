@@ -188,14 +188,10 @@ class FastApiAppTests(unittest.TestCase):
         self.assertEqual([p["name"] for p in items], ["Q3 review"])
         self.assertEqual(items[0]["counts"]["documents"], 0)
 
-    def test_archives_report_only_facts_about_the_document(self) -> None:
+    def test_archives_list_only_archived_documents(self) -> None:
         auth = self._seed_document("fa-archives@example.com")
-        items = self.client.get("/archives", headers=auth).json()["archives"]
-        self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]["title"], "Q3 Board Minutes")
-        self.assertEqual(items[0]["source_kind"], "pdf")
-        for invented in ("kind", "classification", "expiry", "archived", "accessed", "size"):
-            self.assertNotIn(invented, items[0])
+        # A document is not "archived" just because it exists.
+        self.assertEqual(self.client.get("/archives", headers=auth).json()["documents"], [])
 
     # ── MFA (TOTP step-up) ───────────────────────────────────────────────
     def _enrol_mfa(self, email: str) -> str:

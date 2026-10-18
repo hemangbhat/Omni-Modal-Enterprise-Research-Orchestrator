@@ -5,6 +5,7 @@ import os
 from typing import Protocol
 
 from omni_modal.qa.embeddings import QueryEmbeddingProvider
+from omni_modal.qa.lexical import candidate_depth, reciprocal_rank_fusion, retrieval_mode, tsquery_text
 from omni_modal.qa.models import QueryRequest, RetrievedChunk
 from omni_modal.observability import observability
 
@@ -36,7 +37,9 @@ class PgVectorChunkRetriever:
         *,
         pool: "ConnectionPool | None" = None,
         cache: "QueryCache | None" = None,
+        mode: str | None = None,
     ) -> None:
+        self.mode = mode or retrieval_mode()
         self._embedding_provider = embedding_provider
         self._database_url = database_url or os.environ.get("DATABASE_URL")
         self._pool = pool
@@ -133,41 +136,7 @@ class PgVectorChunkRetriever:
                             else:
                                 _cursor_ctx = connection.cursor()
                             with _cursor_ctx as cursor:
-                                cursor.execute(
-                                    """
-                                    select
-                                      c.id as chunk_id,
-                                      d.id as document_id,
-                                      d.title,
-                                      d.source_type,
-                                      c.chunk_index,
-                                      c.content,
-                                      1 - (e.embedding <=> %s::vector) as similarity,
-                                      c.metadata
-                                    from embeddings e
-                                    inner join document_chunks c on c.id = e.chunk_id
-                                    inner join documents d on d.id = e.document_id
-                                    where e.tenant_id = %s
-                                      and d.status = 'ready'
-                                      and d.archived_at is null
-                                      and (%s::uuid[] is null or d.id = any(%s::uuid[]))
-                                      and (%s = 0 or 1 - (e.embedding <=> %s::vector) >= %s)
-                                    order by e.embedding <=> %s::vector
-                                    limit %s
-                                    """,
-                                    (
-                                        vector_literal,
-                                        request.tenant_id,
-                                        scope,
-                                        scope,
-                                        request.min_similarity,
-                                        vector_literal,
-                                        request.min_similarity,
-                                        vector_literal,
-                                        request.top_k,
-                                    ),
-                                )
-                                rows = cursor.fetchall()
+                                rows = self._search(cursor, request, vector_literal, scope)
                 except Exception as exc:
                     query_hash = hashlib.md5(request.question.encode()).hexdigest()
                     failure_classification = _classify_retrieval_error(exc)
@@ -199,7 +168,7 @@ class PgVectorChunkRetriever:
                         },
                     )
 
-                return [
+                results = [
                     RetrievedChunk(
                         chunk_id=str(row["chunk_id"]),
                         document_id=str(row["document_id"]),
@@ -212,3 +181,47 @@ class PgVectorChunkRetriever:
                     )
                     for row in rows
                 ]
+                if self._cache is not None and _cache_key is not None:
+                    self._cache.set(_cache_key, results, tenant_id=request.tenant_id)
+                return results
+
+    _COLUMNS = """
+        c.id as chunk_id, d.id as document_id, d.title, d.source_type, c.chunk_index, c.content,
+        1 - (e.embedding <=> %s::vector) as similarity, c.metadata
+        from embeddings e
+        inner join document_chunks c on c.id = e.chunk_id
+        inner join documents d on d.id = e.document_id
+        where e.tenant_id = %s
+          and d.status = 'ready'
+          and d.archived_at is null
+          and (%s::uuid[] is null or d.id = any(%s::uuid[]))
+          and (%s = 0 or 1 - (e.embedding <=> %s::vector) >= %s)
+    """
+
+    def _search(self, cursor, request: QueryRequest, vector_literal: str, scope) -> list[dict]:
+        """The vector ranking, fused with the full-text ranking in hybrid mode."""
+        filters = (vector_literal, request.tenant_id, scope, scope, request.min_similarity,
+                   vector_literal, request.min_similarity)
+        hybrid = self.mode == "hybrid" and tsquery_text(request.question) is not None
+        limit = candidate_depth(request.top_k) if hybrid else request.top_k
+        cursor.execute(
+            f"select {self._COLUMNS} order by e.embedding <=> %s::vector limit %s",
+            (*filters, vector_literal, limit),
+        )
+        vector_rows = cursor.fetchall()
+        if not hybrid:
+            return vector_rows
+        tsquery = tsquery_text(request.question)
+        cursor.execute(
+            f"""select {self._COLUMNS}
+                  and to_tsvector('english', c.content) @@ to_tsquery('english', %s)
+                order by ts_rank_cd(to_tsvector('english', c.content), to_tsquery('english', %s)) desc
+                limit %s""",
+            (*filters, tsquery, tsquery, limit),
+        )
+        keyword_rows = cursor.fetchall()
+        by_id = {str(r["chunk_id"]): r for r in [*vector_rows, *keyword_rows]}
+        ranked = reciprocal_rank_fusion([
+            [str(r["chunk_id"]) for r in vector_rows], [str(r["chunk_id"]) for r in keyword_rows],
+        ])
+        return [by_id[cid] for cid in ranked[: max(0, request.top_k)]]

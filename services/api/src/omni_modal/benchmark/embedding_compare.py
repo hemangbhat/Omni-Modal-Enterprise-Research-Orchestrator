@@ -67,7 +67,7 @@ def evaluate(provider, *, backend_label: str) -> EvalResult:
     """Index CORPUS with ``provider`` and score QUERIES. Returns real metrics."""
     store = InMemoryVectorStore()
     persistence = InMemoryChunkPersistence(store, provider)
-    retriever = InMemoryChunkRetriever(provider, store)
+    retriever = InMemoryChunkRetriever(provider, store, mode="vector")  # compares embeddings alone
 
     ref = SourceReference(source_path="bench://corpus", source_kind="pdf")
     for index, (doc_id, text) in enumerate(CORPUS):

@@ -88,7 +88,7 @@ class RedisRateLimiter:
             raise RateLimitExceeded(retry_after=max(1, int(retry_after)), scope=key)
 
 
-def select_rate_limiter(config: RateLimitConfig | None = None):
+def select_rate_limiter(config: RateLimitConfig | None = None, *, namespace: str = "rl"):
     """Return a Redis-backed limiter when Redis is available, else in-process.
 
     Keeping the selection here means callers (`main.py`, the FastAPI app) do not
@@ -99,5 +99,5 @@ def select_rate_limiter(config: RateLimitConfig | None = None):
     client = get_redis_client()
     if client is not None:
         logger.info("Rate limiting: Redis-backed (distributed).")
-        return RedisRateLimiter(client, config)
+        return RedisRateLimiter(client, config, namespace=namespace)
     return SlidingWindowRateLimiter(config)

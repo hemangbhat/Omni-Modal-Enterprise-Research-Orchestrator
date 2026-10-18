@@ -18,7 +18,8 @@
     "test:frontend": "npm --workspace apps/web run test",
     "test:backend": "python -m pytest services/api/tests -q",
     "test:integration": "python -m unittest discover -s services/api/tests/integration",
-    "validate": "npm run typecheck:web && npm run typecheck:db && npm run test:backend && npm run test:frontend"
+    "validate": "npm run typecheck:web && npm run typecheck:db && npm run test:backend && npm run test:frontend",
+    "test:e2e": "npm --workspace apps/web run e2e"
   },
   "workspaces": [
     "apps/web",

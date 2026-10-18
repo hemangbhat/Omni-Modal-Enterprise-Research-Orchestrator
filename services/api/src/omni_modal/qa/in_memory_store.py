@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 
 from omni_modal.ingestion.models import IngestionResult
 from omni_modal.qa.embeddings import QueryEmbeddingProvider
+from omni_modal.qa.lexical import bm25_scores, candidate_depth, reciprocal_rank_fusion, retrieval_mode
 from omni_modal.qa.models import QueryRequest, RetrievedChunk
 
 
@@ -139,25 +140,29 @@ class InMemoryChunkPersistence:
 
 
 class InMemoryChunkRetriever:
-    """ChunkRetriever backed by an InMemoryVectorStore (cosine similarity)."""
+    """ChunkRetriever backed by an InMemoryVectorStore.
+
+    ``vector`` mode ranks by cosine similarity; ``hybrid`` mode also ranks by
+    BM25 keyword score and fuses the two rankings (see ``qa.lexical``).
+    """
 
     def __init__(
         self,
         embedding_provider: QueryEmbeddingProvider,
         store: InMemoryVectorStore,
+        *,
+        mode: str | None = None,
     ) -> None:
         self._provider = embedding_provider
         self._store = store
+        self.mode = mode or retrieval_mode()
         # Set by the app: False for documents that must not be searched (archived).
         self.is_searchable = None
 
-    def retrieve(self, request: QueryRequest) -> list[RetrievedChunk]:
+    def _candidates(self, request: QueryRequest) -> list[StoredChunk]:
         scope = None if request.document_ids is None else set(request.document_ids)
-        if scope is not None and not scope:
-            return []
-        query_embedding = self._provider.embed_query(request.question)
-        scored: list[tuple[float, StoredChunk]] = []
         allowed: dict[str, bool] = {}
+        out = []
         for chunk in self._store.for_tenant(request.tenant_id):
             if scope is not None and chunk.document_id not in scope:
                 continue
@@ -166,13 +171,35 @@ class InMemoryChunkRetriever:
                     allowed[chunk.document_id] = bool(self.is_searchable(request.tenant_id, chunk.document_id))
                 if not allowed[chunk.document_id]:
                     continue
-            similarity = cosine_similarity(query_embedding, chunk.embedding)
-            if request.min_similarity > 0 and similarity < request.min_similarity:
-                continue
-            scored.append((similarity, chunk))
+            out.append(chunk)
+        return out
 
-        scored.sort(key=lambda item: item[0], reverse=True)
-        top = scored[: max(0, request.top_k)]
+    def retrieve(self, request: QueryRequest) -> list[RetrievedChunk]:
+        if request.document_ids is not None and not request.document_ids:
+            return []
+        top_k = max(0, request.top_k)
+        candidates = self._candidates(request)
+        if not candidates or top_k == 0:
+            return []
+        query_embedding = self._provider.embed_query(request.question)
+        similarity = {c.chunk_id: cosine_similarity(query_embedding, c.embedding) for c in candidates}
+        by_id = {c.chunk_id: c for c in candidates}
+
+        def keep(chunk_id: str) -> bool:
+            return not (request.min_similarity > 0 and similarity[chunk_id] < request.min_similarity)
+
+        vector_ranking = [cid for cid in sorted(similarity, key=lambda cid: similarity[cid], reverse=True) if keep(cid)]
+        if self.mode == "hybrid":
+            depth = candidate_depth(top_k)
+            keyword = bm25_scores(request.question, [c.content for c in candidates])
+            keyword_ranking = [
+                candidates[i].chunk_id
+                for i in sorted(range(len(candidates)), key=lambda i: keyword[i], reverse=True)
+                if keyword[i] > 0 and keep(candidates[i].chunk_id)
+            ][:depth]
+            ranked = reciprocal_rank_fusion([vector_ranking[:depth], keyword_ranking])
+        else:
+            ranked = vector_ranking
         return [
             RetrievedChunk(
                 chunk_id=chunk.chunk_id,
@@ -181,8 +208,8 @@ class InMemoryChunkRetriever:
                 source_type=chunk.source_type,
                 chunk_index=chunk.chunk_index,
                 content=chunk.content,
-                similarity=float(similarity),
+                similarity=float(similarity[chunk.chunk_id]),
                 metadata=dict(chunk.metadata),
             )
-            for similarity, chunk in top
+            for chunk in (by_id[cid] for cid in ranked[:top_k])
         ]

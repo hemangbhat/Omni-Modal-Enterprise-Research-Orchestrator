@@ -43,6 +43,12 @@ from omni_modal.saas.workspaces import (
     WorkspaceStore,
 )
 
+from omni_modal.saas.billing_events import (  # noqa: E402
+    PLAN_EVENTS,
+    AppliedEvent,
+    select_billing_event_store,
+)
+
 DEMO_TENANT = "demo-tenant"
 DEMO_USER = "demo-user"
 
@@ -58,6 +64,7 @@ class SaasService:
         analytics=None,
         storage=None,
         billing=None,
+        billing_events=None,
     ) -> None:
         self.workspaces = workspaces or select_workspace_store()
         self.usage = usage or select_usage_store()
@@ -66,6 +73,7 @@ class SaasService:
         self.analytics = analytics or select_analytics_adapter()
         self.storage = storage or select_storage_adapter()
         self.billing = billing or select_billing_adapter()
+        self.billing_events = billing_events or select_billing_event_store()
         # document_id -> workspace_id (real workspace scoping for ingested docs)
         self._doc_lock = threading.RLock()
         self._doc_workspace: dict[str, str] = {}
@@ -340,10 +348,42 @@ class SaasService:
         )
         return {"url": session.url}
 
-    def apply_webhook_event(self, event: dict) -> None:
-        """React to verified Stripe webhook events (idempotent plan sync)."""
+    def _event_tenant(self, event_type: str, obj: dict) -> str | None:
+        if event_type == "checkout.session.completed":
+            return (obj.get("metadata") or {}).get("omero_tenant_id")
+        customer_id = obj.get("customer")
+        org = self.workspaces.get_org_by_stripe_customer(customer_id) if customer_id else None
+        return org.tenant_id if org is not None else None
+
+    def apply_webhook_event(self, event: dict) -> str:
+        """React to a verified Stripe event once, in order.
+
+        Returns "applied", "duplicate" (this event id was already applied) or
+        "stale" (a plan event older than the organization's last applied one).
+        The event is recorded only after it is applied, so a failure leaves it
+        for Stripe's retry; applying the same event twice sets the same state.
+        Events without an id (hand-built in tests and scripts) are always applied.
+        """
         event_type = event.get("type", "")
         obj = (event.get("data") or {}).get("object") or {}
+        event_id = event.get("id")
+        created = event.get("created")
+        created = float(created) if isinstance(created, (int, float)) else None
+        tenant_id = self._event_tenant(event_type, obj)
+        if event_id:
+            if self.billing_events.seen(event_id):
+                return "duplicate"
+            if event_type in PLAN_EVENTS and tenant_id and created is not None:
+                last = self.billing_events.last_plan_event_at(tenant_id)
+                if last is not None and created < last:
+                    self.billing_events.record(AppliedEvent(event_id, event_type, tenant_id, created))
+                    return "stale"
+        self._apply_event(event_type, obj)
+        if event_id:
+            self.billing_events.record(AppliedEvent(event_id, event_type, tenant_id, created))
+        return "applied"
+
+    def _apply_event(self, event_type: str, obj: dict) -> None:
 
         if event_type == "checkout.session.completed":
             customer_id = obj.get("customer")

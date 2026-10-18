@@ -12,7 +12,7 @@ A multi-tenant enterprise research platform that ingests PDF and audio documents
 - **Observability** — Sentry distributed tracing across frontend and backend, property-based tests for correctness
 - **Enterprise security** — JWT authentication, RBAC, document-level access control, PII scrubbing, rate limiting, content redaction before external delegation
 - **Performance** — async ingestion queue, connection pooling, query result caching, batch embedding writes
-- **Test quality** — 721 backend tests (unit, HTTP integration, Hypothesis property-based) and 130 frontend tests (API clients and screen-level tests of sign-in, two-step sign-in, password reset, research, the assistant, projects, the dashboard and the document library); CI is configured to run both suites
+- **Test quality** — 751 backend tests (unit, HTTP integration, Hypothesis property-based) and 130 frontend tests (API clients and screen-level tests of sign-in, two-step sign-in, password reset, research, the assistant, projects, the dashboard and the document library); CI is configured to run both suites
 - **Works locally without a database** — a Postgres-free in-memory path wires ingestion → persistence → retrieval end-to-end so the demo runs out of the box (with a deterministic, non-semantic embedder)
 
 ---
@@ -268,7 +268,7 @@ Model defaults: `GROQ_MODEL=openai/gpt-oss-120b`, `GEMINI_MODEL=gemini-flash-lat
 ### Tests
 
 ```bash
-# Backend unit, property-based and HTTP integration tests (721 tests).
+# Backend unit, property-based and HTTP integration tests (751 tests).
 # The suite never reads your .env, so it does not use your real keys or database.
 cd services/api && python -m pytest tests
 
@@ -280,7 +280,29 @@ npm run typecheck:web
 
 # Run everything
 npm run validate
+
+# Retrieval and citation evaluation (no keys, no database)
+cd services/api && python -m omni_modal.benchmark.eval
+
+# Browser end-to-end journey: sign up, upload, ask, save to a project, report.
+# Starts its own API (in memory) on :8100 and a production build on :3100.
+npm run test:e2e
+
+# Postgres: migrations from an empty database, restart survival, and the
+# cross-tenant checks on the Postgres stores. Uses a throwaway local container;
+# the tests refuse any non-local database and never read DATABASE_URL.
+docker run -d --name omero-test-pg -p 5433:5432 -e POSTGRES_PASSWORD=omero -e POSTGRES_DB=omero_test pgvector/pgvector:pg16
+cd services/api && OMERO_TEST_DATABASE_URL=postgresql://postgres:omero@localhost:5433/omero_test \
+  python -m pytest tests/test_postgres_restart.py tests/test_postgres_product.py tests/test_cross_tenant_routes.py
 ```
+
+What these prove:
+- **Tenant isolation:** `test_cross_tenant_routes.py` gives one tenant's ids to another tenant on every
+  route that takes an id (30 routes) and expects 403 or 404 with none of the first tenant's text, then
+  checks every list and search. A new route with an id fails the test until it is added.
+- **Restart:** `test_postgres_restart.py` creates data in one process and checks it from a fresh one.
+- **Billing:** `test_billing_lifecycle.py` covers upgrade, downgrade, cancellation, duplicate webhook
+  delivery, and an old event arriving after a newer one.
 
 ### Database
 
@@ -376,12 +398,42 @@ EMBEDDING_BACKEND=sentence-transformers  python -m omni_modal.main
 
 ### Measured retrieval quality (real numbers)
 
-`python -m omni_modal.benchmark.embedding_compare` computes recall@1 / MRR live
-on a 5-doc / 5-query paraphrase set where queries deliberately share few surface
-tokens with their target document:
+`services/api/eval/corpus.json` is a labelled corpus for a fictional company: 32 short documents,
+including deliberate near-misses (two vendor renewals, two budgets, similar incident reports), and
+56 questions. Each question names its relevant document and the fact a correct citation must quote.
+Half ask in different words from the document ("paraphrase"); half hinge on an exact name, code or
+figure ("keyword"). The runner sends the documents through the real chunker and in-memory store and
+the questions through the real retriever and answer path. It needs no database, network or key.
 
-| Backend | recall@1 | MRR | How measured |
-|---|---|---|---|
+```bash
+cd services/api
+python -m omni_modal.benchmark.eval --backends hashing,sentence-transformers
+```
+
+Measured on 2026-10-18 (`eval/results.json`):
+
+| Embeddings | Retrieval | Recall@1 | Recall@5 | MRR | Supported citation |
+|---|---|---|---|---|---|
+| hashing (deployed) | vector | 0.589 | 0.821 | 0.681 | 0.607 |
+| hashing (deployed) | **hybrid** | **0.768** | **0.929** | **0.839** | **0.714** |
+| all-MiniLM-L6-v2 (local) | vector | 0.786 | 0.946 | 0.853 | 0.679 |
+| all-MiniLM-L6-v2 (local) | **hybrid** | **0.821** | 0.929 | **0.871** | **0.696** |
+
+- **Hybrid** runs keyword search (BM25 in memory, Postgres full-text search in production) next to
+  vector search and merges the two rankings with reciprocal rank fusion. It raises top-1 accuracy for
+  both embedding models, so it is the default (`RETRIEVAL_MODE=hybrid`; set `vector` to turn it off).
+  With MiniLM, recall@5 drops by one question (0.946 to 0.929).
+- **Supported citation** means the answer cites a relevant document *and* the quoted snippet contains
+  the labelled fact. It is lower than recall because, without a language model, the quoted sentence is
+  picked by word overlap and sometimes misses (for example, it quotes a contract's renewal date when
+  asked who owns the contract). With a model configured, the snippet is chosen by the claim that cites it.
+- This is a small corpus written for this project, not a public benchmark. CI re-runs it with the
+  hashing backend and fails if any score drops by more than 0.02 (`--check eval/results.json`).
+
+The older `python -m omni_modal.benchmark.retrieval_eval` runs a 16-question set through Postgres
+and pgvector; point it only at a disposable database.
+
+---|---|---|---|
 | `hashing` (fallback) | **0.40** | **0.70** | Live run, no network |
 | semantic (concept stub, in tests) | **1.00** | **1.00** | `test_embedding_providers.py` |
 
@@ -591,13 +643,12 @@ Internal document chunks must never leave the tenant security boundary. The `Red
 
 Audited on 2026-10-11 against the target product description. These are not built yet; the plan and order are in `docs/superpowers/specs/2026-10-11-omero-completion-design.md`.
 
-- **Research:** no full-text or hybrid search and no reranker yet; they are planned together with a measured retrieval evaluation, so they are only switched on if they help.
+- **Research:** no reranker. Without a language model, the quoted snippet is chosen by word overlap and is sometimes not the sentence that answers (measured above as "supported citation").
 - **External research:** the delegation client is generic and off unless an endpoint is configured; no provider is wired.
 - **Plans:** the plan table defines feature flags (SSO, audit export, priority ingest, external delegation) that nothing enforces or implements yet, so the pricing and billing pages list only the enforced limits.
-- **Operations:** backup and recovery are not documented.
 - **Deployment:** the Render free tier runs the hashing embedder, which is not semantic.
-- **Frontend:** no browser end-to-end test. `npm run lint` is broken (`next lint` was removed in Next.js 16).
-- **Fresh databases:** `0002_perf.sql` contains `ALTER DATABASE current_database() SET ...`, which does not look like valid SQL, and the live database was missing that file's covering index until it was added by hand on 2026-10-11. Building a new database from the migration files alone has not been tested and may stop at 0002.
+- **Frontend:** `npm run lint` is broken (`next lint` was removed in Next.js 16). The browser test covers one journey, not every page.
+- **Rate limits:** every signed-in request counts against a per-user limit (300 a minute) and per-tenant limit (1,200); questions, the assistant and uploads also count against a stricter one (20 and 60). Set with `RATE_LIMIT_*` variables.
 - **Docker image:** the image with the new dependency set has not been built locally; the first Render deploy is its first build.
 - **Lost authenticator:** there are no backup codes and no self-service recovery; password reset deliberately keeps two-step sign-in on. An operator has to remove the enrolment: `DELETE FROM user_mfa WHERE tenant_id = '<tenant>' AND user_id = '<user id>';`
 - **Account security limits:** `/auth/login` itself is not rate-limited (only the code step locks). TOTP secrets are stored unencrypted in `user_mfa`. Turning two-step sign-in on or off is not written to the audit log. Using one reset link does not cancel other unused links for the same address. With several API instances, two simultaneous requests could both accept the same code or challenge, because the check and the update are separate statements.

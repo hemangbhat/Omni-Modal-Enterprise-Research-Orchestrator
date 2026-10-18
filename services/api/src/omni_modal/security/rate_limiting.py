@@ -12,6 +12,28 @@ class RateLimitConfig:
     delegation_rph: int = 10   # per-tenant delegation requests per hour
 
 
+def _env_int(name: str, default: int) -> int:
+    import os  # noqa: PLC0415
+
+    try:
+        value = int(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def general_limits() -> RateLimitConfig:
+    """Every authenticated request. Generous: one page load makes several calls."""
+    return RateLimitConfig(tenant_rpm=_env_int("RATE_LIMIT_TENANT_RPM", 1200),
+                           user_rpm=_env_int("RATE_LIMIT_USER_RPM", 300))
+
+
+def heavy_limits() -> RateLimitConfig:
+    """Requests that cost real work: research questions, the assistant, uploads, reprocessing."""
+    return RateLimitConfig(tenant_rpm=_env_int("RATE_LIMIT_HEAVY_TENANT_RPM", 60),
+                           user_rpm=_env_int("RATE_LIMIT_HEAVY_USER_RPM", 20))
+
+
 class RateLimitExceeded(Exception):
     def __init__(self, retry_after: int, scope: str) -> None:
         super().__init__(f"Rate limit exceeded for {scope}.")

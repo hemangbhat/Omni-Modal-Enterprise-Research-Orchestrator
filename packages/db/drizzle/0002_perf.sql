@@ -19,7 +19,11 @@ CREATE INDEX embeddings_vector_hnsw_idx
   WITH (m = 16, ef_construction = 64);
 
 -- Session-level ef_search default (higher = better recall, slower search).
-ALTER DATABASE current_database() SET hnsw.ef_search = 40;
+-- ALTER DATABASE takes a name, not an expression, so it is built dynamically.
+DO $$
+BEGIN
+  EXECUTE format('ALTER DATABASE %I SET hnsw.ef_search = 40', current_database());
+END $$;
 
 -- Covering index to eliminate heap fetch for tenant filter
 -- INCLUDE(chunk_id) allows the planner to satisfy tenant+document filter

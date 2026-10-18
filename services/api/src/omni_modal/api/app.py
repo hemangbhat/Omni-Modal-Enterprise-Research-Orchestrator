@@ -55,7 +55,7 @@ from omni_modal.security.accounts import AccountError, get_account_service
 from omni_modal.security.auth import AuthError, JwtClaims, _make_jwt, jwt_secret_from_env, verify_jwt
 from omni_modal.security.mfa import MfaAlreadyEnrolled, MfaLocked
 from omni_modal.security.rbac import RbacError, assert_endpoint_roles
-from omni_modal.security.rate_limiting import RateLimitExceeded
+from omni_modal.security.rate_limiting import RateLimitExceeded, general_limits, heavy_limits
 from omni_modal.security.redis_rate_limiter import select_rate_limiter
 from omni_modal.qa.redis_cache import select_query_cache
 
@@ -238,6 +238,7 @@ class _State:
     vector_store: Any = None
     audit_sink: Any = None
     rate_limiter: Any = None
+    heavy_rate_limiter: Any = None
     query_cache: Any = None
     sessions: Any = None
     mfa: Any = None
@@ -268,7 +269,8 @@ def _build_runtime() -> None:
     # Shared coordination primitives — Redis-backed when REDIS_URL is set
     # (stateless, horizontally-scalable web tier), else in-process.
     state.query_cache = select_query_cache()
-    state.rate_limiter = select_rate_limiter()
+    state.rate_limiter = select_rate_limiter(general_limits())
+    state.heavy_rate_limiter = select_rate_limiter(heavy_limits(), namespace="rlh")
 
     if os.environ.get("DATABASE_URL"):
         from omni_modal.qa.pg_persistence import PostgresChunkPersistence  # noqa: PLC0415
@@ -464,6 +466,19 @@ def create_app() -> FastAPI:
     install_security_headers(app)
 
     # ── Auth dependency ──────────────────────────────────────────────────
+    def _limit(limiter, claims: JwtClaims) -> None:
+        if limiter is None:
+            return
+        try:
+            limiter.check_tenant(claims.tenant_id)
+            limiter.check_user(claims.tenant_id, claims.user_id)
+        except RateLimitExceeded as exc:
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Rate limit exceeded. Retry after {exc.retry_after}s.",
+                headers={"Retry-After": str(exc.retry_after)},
+            ) from exc
+
     def current_claims(authorization: str | None = Header(default=None)) -> JwtClaims:
         if not authorization or not authorization.lower().startswith("bearer "):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token.")
@@ -473,18 +488,13 @@ def create_app() -> FastAPI:
         except AuthError as exc:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc)) from exc
 
-        # Distributed (or in-process) rate limiting, applied to every
-        # authenticated request — mirrors the stdlib server.
-        if state.rate_limiter is not None:
-            try:
-                state.rate_limiter.check_tenant(claims.tenant_id)
-                state.rate_limiter.check_user(claims.tenant_id, claims.user_id)
-            except RateLimitExceeded as exc:
-                raise HTTPException(
-                    status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail=f"Rate limit exceeded. Retry after {exc.retry_after}s.",
-                    headers={"Retry-After": str(exc.retry_after)},
-                ) from exc
+        # Distributed (or in-process) rate limiting on every authenticated
+        # request; costly routes also pass the stricter limit (heavy_request).
+        _limit(state.rate_limiter, claims)
+        return claims
+
+    def heavy_request(claims: JwtClaims = Depends(current_claims)) -> JwtClaims:
+        _limit(state.heavy_rate_limiter, claims)
         return claims
 
     def require_roles(path: str):
@@ -768,7 +778,7 @@ def create_app() -> FastAPI:
         return {"reset": True}
 
     # ── Query ────────────────────────────────────────────────────────────
-    @app.post("/query", tags=["research"])
+    @app.post("/query", tags=["research"], dependencies=[Depends(heavy_request)])
     async def query(body: QueryRequestModel, claims: JwtClaims = Depends(require_roles("/query"))) -> dict:
         meter(claims, "queries")
         req = QueryRequest(
@@ -849,7 +859,7 @@ def create_app() -> FastAPI:
             else:
                 self.save("No answer was produced: the request ended before it finished.", "failed", [])
 
-    @app.post("/query/stream", tags=["research"])
+    @app.post("/query/stream", tags=["research"], dependencies=[Depends(heavy_request)])
     def query_stream(body: QueryRequestModel, claims: JwtClaims = Depends(require_roles("/query/stream"))):
         history, session_project = _load_session(claims, body.session_id, "research")
         project_id = session_project if body.session_id else body.project_id
@@ -934,7 +944,7 @@ def create_app() -> FastAPI:
         return {"deleted": True}
 
     # ── Site-wide assistant (read-only) ──────────────────────────────────
-    @app.post("/assistant/stream", tags=["assistant"])
+    @app.post("/assistant/stream", tags=["assistant"], dependencies=[Depends(heavy_request)])
     def assistant_stream(body: AssistantRequest, claims: JwtClaims = Depends(current_claims)):
         history = _load_history(claims, body.session_id, "assistant")
         meter(claims, "queries")
@@ -1154,7 +1164,7 @@ def create_app() -> FastAPI:
     def _document_payload(doc, job) -> dict:
         return {"document": doc.to_dict(), "job": job.to_dict() if job else None}
 
-    @app.post("/documents/uploads", tags=["documents"])
+    @app.post("/documents/uploads", tags=["documents"], dependencies=[Depends(heavy_request)])
     def create_upload(body: CreateUploadRequest, response: Response,
                       claims: JwtClaims = Depends(require_roles("/ingest/upload"))) -> dict:
         """Start an upload: returns where to send the file, or the existing copy of it."""
@@ -1233,7 +1243,7 @@ def create_app() -> FastAPI:
         state.projects.forget_document(claims.tenant_id, document_id)
         return {"deleted": True}
 
-    @app.post("/documents/{document_id}/reprocess", status_code=202, tags=["documents"])
+    @app.post("/documents/{document_id}/reprocess", status_code=202, tags=["documents"], dependencies=[Depends(heavy_request)])
     def reprocess_document(document_id: str,
                            claims: JwtClaims = Depends(require_roles("/documents/manage"))) -> dict:
         job = _documents_call(state.documents.reprocess, claims.tenant_id, claims.user_id, claims.roles, document_id)
@@ -1255,7 +1265,7 @@ def create_app() -> FastAPI:
         return FileResponse(path, media_type=doc.content_type or "application/octet-stream",
                             filename=safe_download_name(doc.file_name))
 
-    @app.post("/ingest/upload", status_code=202, tags=["ingestion"])
+    @app.post("/ingest/upload", status_code=202, tags=["ingestion"], dependencies=[Depends(heavy_request)])
     def ingest_upload(body: UploadRequest, claims: JwtClaims = Depends(require_roles("/ingest/upload"))) -> dict:
         """One-call upload with the file inside the JSON body (scripts and API clients)."""
         try:
@@ -1566,7 +1576,13 @@ def create_app() -> FastAPI:
         return {"job": job.to_dict()}
 
     @app.get("/entities/{document_id}", tags=["documents"])
-    async def entities(document_id: str, claims: JwtClaims = Depends(require_roles("/entities/"))) -> dict:
+    def entities(document_id: str, claims: JwtClaims = Depends(require_roles("/entities/"))) -> dict:
+        known = _document_exists(claims.tenant_id, document_id) or (
+            state.vector_store is not None
+            and any(c.document_id == document_id for c in state.vector_store.for_tenant(claims.tenant_id))
+        )
+        if not known:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found.")
         try:
             records = state.entity_service.get_records(claims.tenant_id, document_id)
             items = [{"id": r.id, "label": r.label, "value": r.value, "confidence": r.confidence}
@@ -1589,11 +1605,12 @@ def create_app() -> FastAPI:
         except Exception as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Webhook verification failed: {exc}") from exc
         try:
-            state.saas.apply_webhook_event(event)
+            outcome = state.saas.apply_webhook_event(event)
         except Exception as exc:
             observability.capture_exception(exc, operation="api.webhook")
             raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Webhook processing error.") from exc
-        return {"received": True}
+        # 200 for duplicates and stale events too, so Stripe stops resending them.
+        return {"received": True, "outcome": outcome}
 
     return app
 

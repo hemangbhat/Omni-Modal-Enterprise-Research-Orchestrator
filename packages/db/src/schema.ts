@@ -196,6 +196,10 @@ export const documentChunks = pgTable(
     tenantIdx: index("document_chunks_tenant_idx").on(table.tenantId),
     documentIdx: index("document_chunks_document_idx").on(table.documentId),
     contentHashIdx: index("document_chunks_content_hash_idx").on(table.contentHash),
+    contentFtsIdx: index("document_chunks_content_fts_idx").using(
+      "gin",
+      sql`to_tsvector('english', ${table.content})`
+    ),
     documentChunkUnique: uniqueIndex("document_chunks_document_index_unique").on(
       table.documentId,
       table.chunkIndex
@@ -214,7 +218,7 @@ export const embeddings = pgTable(
     chunkId: uuid("chunk_id")
       .notNull()
       .references(() => documentChunks.id, { onDelete: "cascade" }),
-    embedding: vector("embedding", { dimensions: 1536 }).notNull(),
+    embedding: vector("embedding", { dimensions: 384 }).notNull(), // 0004_embeddings_384.sql
     embeddingModel: text("embedding_model").notNull(),
     dimensions: integer("dimensions").notNull().default(1536),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
@@ -442,3 +446,18 @@ export const projectActivity = pgTable("project_activity", {
   detail: jsonb("detail").notNull().default({}),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
 });
+
+// Stripe events applied once (0014): duplicates and older plan events are ignored.
+export const stripeEvents = pgTable(
+  "stripe_events",
+  {
+    eventId: text("event_id").primaryKey(),
+    eventType: text("event_type").notNull(),
+    tenantId: text("tenant_id"),
+    stripeCreatedAt: timestamp("stripe_created_at", { withTimezone: true }),
+    processedAt: timestamp("processed_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => ({
+    tenantIdx: index("stripe_events_tenant_idx").on(table.tenantId, table.stripeCreatedAt.desc())
+  })
+);

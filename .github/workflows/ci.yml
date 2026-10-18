@@ -39,6 +39,93 @@ jobs:
           # (which starts a real HTTP server).
           python -m pytest tests -q
 
+  backend-postgres:
+    name: Backend on Postgres (migrations, restart, isolation)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: omero
+          POSTGRES_DB: omero_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    defaults:
+      run:
+        working-directory: services/api
+    env:
+      # Only this variable is read by the Postgres tests; DATABASE_URL is never used.
+      OMERO_TEST_DATABASE_URL: postgresql://postgres:omero@localhost:5432/omero_test
+      JWT_SECRET: "ci-test-secret-${{ github.run_id }}"
+      ENVIRONMENT: ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -e ".[db,observability,performance,api,saas,scale,test]"
+      - name: Apply every migration to an empty database
+        run: DATABASE_URL="$OMERO_TEST_DATABASE_URL" python ../../scripts/migrate.py
+      - name: Restart, Postgres SQL and cross-tenant tests
+        # Run on their own: they switch the app to Postgres for the whole process.
+        run: python -m pytest -q tests/test_postgres_restart.py tests/test_postgres_product.py tests/test_cross_tenant_routes.py
+
+  retrieval-eval:
+    name: Retrieval evaluation (regression gate)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -e ".[db,observability,performance,api,saas,scale,test]"
+      - name: Evaluate against the committed results
+        env:
+          OMERO_DISABLE_DOTENV: "1"
+        run: python -m omni_modal.benchmark.eval --backends hashing --check eval/results.json
+
+  e2e:
+    name: End-to-end journey (Playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: Install backend
+        working-directory: services/api
+        run: pip install -e ".[db,observability,performance,api,saas,scale,test]"
+      - name: Install frontend
+        run: npm install --legacy-peer-deps
+      - name: Install Chromium
+        working-directory: apps/web
+        run: npx playwright install --with-deps chromium
+      - name: Run the journey
+        working-directory: apps/web
+        env:
+          PLAYWRIGHT_CHROMIUM: "1"
+        run: npx playwright test
+      - name: Keep the report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: apps/web/playwright-report
+
   frontend-typecheck:
     name: Frontend TypeCheck + Tests
     runs-on: ubuntu-latest

@@ -151,12 +151,48 @@ Local webhook testing: `stripe listen --forward-to localhost:8000/billing/webhoo
 4. **Migrations in CI:** run `python scripts/migrate.py` as a release step before
    promoting new code.
 
-### Backups & PITR
-- Neon provides automated backups and point-in-time restore on paid tiers
-  (history retention is plan-dependent); the free tier has limited retention.
-- Before destructive migrations, take a manual branch/snapshot in Neon.
-- Object storage (S3) lifecycle/versioning is configured on the bucket, not in
-  app code.
+### Backup and recovery
+
+**What holds state.** Postgres (Neon) holds everything that matters: accounts, documents and their
+processing jobs, chunks and embeddings, research sessions, projects, reports and billing state.
+Object storage (S3) holds the original uploaded files. Redis holds only caches, rate-limit windows
+and queue transport, and can be emptied at any time. Secrets live in the Render and Vercel dashboards.
+
+**Backups.**
+- Neon keeps a history of the database and can restore it to a point in time, within the history
+  window of the project's plan (check it in the Neon console under the project settings).
+- Before a risky migration, create a Neon branch of production as a snapshot.
+- Turn on versioning for the S3 bucket, so an overwritten or deleted original can be recovered.
+  The app writes each upload under its own key and never overwrites one.
+
+**Recovering the database.**
+1. In Neon, restore the production branch to a time before the problem (or create a branch at that
+   time and point the app at it).
+2. Set `DATABASE_URL` in Render to the restored branch if it changed.
+3. Run `python scripts/migrate.py` against it. It applies only migrations missing from
+   `schema_migrations`, so it is safe to run on a restored copy.
+4. Redeploy or restart the API. On startup, ingestion jobs that were mid-way are picked up again.
+5. Check `GET /health/ready` and sign in.
+
+Documents uploaded after the restore point are not in the restored database, but their files may
+still be in S3. Ask those users to upload them again; re-uploading the same file is recognised by
+its content hash.
+
+**Recovering search data.** Chunks and embeddings come from the original files. If they are lost
+or damaged, use **Reprocess** on a document (or `POST /documents/{id}/reprocess`) to rebuild them
+from the stored original.
+
+**Proving it works.** `tests/test_postgres_restart.py` runs in CI against a fresh database: it
+applies every migration from an empty schema, creates a user, a document, a research session, a
+project and a report, starts a new process, and checks that all of them are still there and that
+research still finds the document. Run it locally against a throwaway container:
+
+```bash
+docker run -d --name omero-test-pg -p 5433:5432 -e POSTGRES_PASSWORD=omero -e POSTGRES_DB=omero_test pgvector/pgvector:pg16
+OMERO_TEST_DATABASE_URL=postgresql://postgres:omero@localhost:5433/omero_test python -m pytest services/api/tests/test_postgres_restart.py
+```
+
+The tests refuse any database that is not on the local machine.
 
 ---
 

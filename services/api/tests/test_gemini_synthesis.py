@@ -57,8 +57,9 @@ class GeminiSynthesisTests(unittest.TestCase):
         self.assertEqual(len(resp.citations), 2)
 
     def test_prompt_contains_numbered_context_and_instruction(self) -> None:
-        synth = GeminiAnswerSynthesizer(api_key="k")
-        prompt = synth._build_prompt("How much did revenue grow?", _chunks())
+        from omni_modal.qa.grounded import SYSTEM_PROMPT, build_messages
+
+        prompt = SYSTEM_PROMPT + "\n" + build_messages(_request(), _chunks())[-1]["content"]
         self.assertIn("[1]", prompt)
         self.assertIn("[2]", prompt)
         self.assertIn("Revenue grew 18%", prompt)

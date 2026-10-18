@@ -1,377 +1,559 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { AnswerMarkdown } from "@/components/answer-markdown";
+import { EvidenceCard } from "@/components/evidence-card";
 import { MaterialIcon } from "@/components/material-icon";
-import { apiRequest, captureQueryError } from "@/lib/api-client";
-import { getClientApiConfig } from "@/lib/env";
+import { captureQueryError } from "@/lib/api-client";
+import {
+  ApiRequestError,
+  answerBody,
+  deleteSession,
+  getSession,
+  listSessions,
+  renameSession,
+  streamResearch,
+  type Citation,
+  type SessionDetail,
+  type SessionSummary
+} from "@/lib/research-api";
 
-type SourceCitation = {
-  title: string;
-  source_type: string;
-  chunk_index: number;
+type Turn = {
+  key: string;
+  question: string;
+  answer: string;
+  status: string | null;
+  citations: Citation[];
+  streaming: boolean;
+  error: string | null;
 };
 
-type HistoryEntry = { id: string; question: string; time: string };
+const EXAMPLES = [
+  "Summarize the key decisions in my most recent document",
+  "What risks or open issues are mentioned?",
+  "Which documents talk about budget or spending?"
+];
 
-const HISTORY_KEY = "omni_research_history";
-const HISTORY_LIMIT = 50;
-
-function loadHistory(): HistoryEntry[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(HISTORY_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (e): e is HistoryEntry =>
-        !!e &&
-        typeof (e as HistoryEntry).id === "string" &&
-        typeof (e as HistoryEntry).question === "string"
-    );
-  } catch {
-    return [];
+function turnsFrom(detail: SessionDetail): Turn[] {
+  const turns: Turn[] = [];
+  for (const m of detail.messages) {
+    if (m.role === "user") {
+      turns.push({ key: m.id, question: m.content, answer: "", status: null, citations: [], streaming: false, error: null });
+    } else if (turns.length) {
+      const last = turns[turns.length - 1];
+      last.answer = m.content;
+      last.status = m.status;
+      last.citations = m.citations ?? [];
+    }
   }
+  return turns;
 }
 
-function saveHistory(entries: HistoryEntry[]): void {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(HISTORY_KEY, JSON.stringify(entries.slice(0, HISTORY_LIMIT)));
-  } catch {
-    /* ignore quota / unavailable storage */
-  }
+function relativeTime(epochSeconds: number): string {
+  const diff = Date.now() / 1000 - epochSeconds;
+  if (diff < 60) return "Just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)} min ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)} h ago`;
+  return new Date(epochSeconds * 1000).toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
 export function ResearchChat() {
-  const [prompt, setPrompt] = useState("");
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [answer, setAnswer] = useState("");
-  const [activeQuestion, setActiveQuestion] = useState<string | null>(null);
-  const [citations, setCitations] = useState<SourceCitation[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [sessionsError, setSessionsError] = useState<string | null>(null);
+  const [sessionsLoading, setSessionsLoading] = useState(true);
   const [activeId, setActiveId] = useState<string | null>(null);
-  const answerRef = useRef("");
+  const [turns, setTurns] = useState<Turn[]>([]);
+  const [loadingSession, setLoadingSession] = useState(false);
+  const [selected, setSelected] = useState<number>(-1);
+  const [activeCitation, setActiveCitation] = useState<number | null>(null);
+  const [prompt, setPrompt] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [showSessions, setShowSessions] = useState(false);
+  const threadEnd = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  // Restore persisted query history on mount so prior queries are visible
-  // immediately (not only after sending a new one).
-  useEffect(() => {
-    setHistory(loadHistory());
+  const refreshSessions = useCallback(async () => {
+    try {
+      setSessions(await listSessions("research"));
+      setSessionsError(null);
+    } catch (err) {
+      setSessionsError(err instanceof Error ? err.message : "Could not load saved research.");
+    } finally {
+      setSessionsLoading(false);
+    }
   }, []);
 
-  async function submitPrompt(explicitQuestion?: string) {
-    const trimmed = (explicitQuestion ?? prompt).trim();
-    if (!trimmed || isStreaming) return;
+  useEffect(() => {
+    void refreshSessions();
+  }, [refreshSessions]);
 
-    // Reuse an existing history entry when re-running a past query; otherwise
-    // create a new one. `id`/`time` are computed synchronously so they're
-    // available immediately; the updater persists the reordered list.
-    const existing = history.find((entry) => entry.question === trimmed);
-    const id = existing ? existing.id : `q-${Date.now()}`;
-    const time = existing
-      ? existing.time
-      : new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  useEffect(() => {
+    threadEnd.current?.scrollIntoView({ block: "end", behavior: "smooth" });
+  }, [turns.length]);
 
-    setHistory((current) => {
-      const without = current.filter((entry) => entry.id !== id);
-      const next = [{ id, question: trimmed, time }, ...without];
-      saveHistory(next);
-      return next;
-    });
+  const shownTurn = turns[selected >= 0 ? selected : turns.length - 1];
+
+  async function openSession(id: string) {
+    if (busy || id === activeId) return;
+    setShowSessions(false);
     setActiveId(id);
-    setActiveQuestion(trimmed);
-    setPrompt("");
-    setError(null);
-    setCitations([]);
-    setAnswer("");
-    answerRef.current = "";
-    setIsStreaming(true);
-
-    const { baseUrl, token } = getClientApiConfig();
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      Accept: "text/event-stream"
-    };
-    if (token) headers.Authorization = `Bearer ${token}`;
-
+    setLoadingSession(true);
+    setTurns([]);
+    setSelected(-1);
+    setActiveCitation(null);
     try {
-      const response = await apiRequest(
-        "/query/stream",
-        { method: "POST", headers, body: JSON.stringify({ question: trimmed }) },
-        { baseUrl, timeout: 60_000 }
-      );
-      if (!response.ok || !response.body) {
-        captureQueryError({ query_length: trimmed.length, http_status: response.status });
-        setError(`Request failed (HTTP ${response.status}).`);
-        setIsStreaming(false);
-        return;
-      }
-      await consumeSse(response.body, {
-        onDelta: (delta) => {
-          answerRef.current += delta;
-          setAnswer(answerRef.current);
-        },
-        onDone: (payload) => {
-          const cites = Array.isArray(payload?.citations)
-            ? (payload.citations as SourceCitation[])
-            : [];
-          setCitations(cites);
-        }
-      });
+      setTurns(turnsFrom(await getSession(id)));
     } catch (err) {
-      captureQueryError({ query_length: trimmed.length, http_status: "network_error" });
-      setError(err instanceof Error ? err.message : "Unexpected error contacting backend.");
+      setSessionsError(err instanceof Error ? err.message : "Could not open this research.");
+      setActiveId(null);
+      void refreshSessions();
     } finally {
-      setIsStreaming(false);
+      setLoadingSession(false);
     }
   }
 
+  function startNew() {
+    if (busy) return;
+    setActiveId(null);
+    setTurns([]);
+    setSelected(-1);
+    setActiveCitation(null);
+    setShowSessions(false);
+    inputRef.current?.focus();
+  }
+
+  function patchTurn(index: number, patch: Partial<Turn> | ((t: Turn) => Partial<Turn>)) {
+    setTurns((current) =>
+      current.map((t, i) => (i === index ? { ...t, ...(typeof patch === "function" ? patch(t) : patch) } : t))
+    );
+  }
+
+  async function submit(text?: string) {
+    const question = (text ?? prompt).trim();
+    if (!question || busy) return;
+    const index = turns.length;
+    setTurns((current) => [
+      ...current,
+      { key: `pending-${Date.now()}`, question, answer: "", status: null, citations: [], streaming: true, error: null }
+    ]);
+    setSelected(-1);
+    setActiveCitation(null);
+    setPrompt("");
+    setBusy(true);
+    try {
+      await streamResearch(question, activeId, {
+        onSession: (id) => setActiveId(id),
+        onDelta: (delta) => patchTurn(index, (t) => ({ answer: t.answer + delta })),
+        onDone: (done) =>
+          patchTurn(index, {
+            answer: done.answer_markdown,
+            status: done.status,
+            citations: done.citations ?? [],
+            streaming: false
+          })
+      });
+    } catch (err) {
+      const status = err instanceof ApiRequestError ? err.status : "network_error";
+      captureQueryError({ query_length: question.length, http_status: status === 0 ? "network_error" : status });
+      patchTurn(index, {
+        streaming: false,
+        error: err instanceof Error ? err.message : "Could not reach the research service. Check your connection and try again."
+      });
+    } finally {
+      setBusy(false);
+      void refreshSessions();
+    }
+  }
+
+  function cite(turnIndex: number, n: number) {
+    setSelected(turnIndex);
+    setActiveCitation(n);
+    // After the evidence column has re-rendered for this turn.
+    window.setTimeout(() => {
+      document.getElementById(`evidence-${n}`)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }, 0);
+  }
+
+  const activeTitle = sessions.find((s) => s.id === activeId)?.title;
+
   return (
-    <div className="flex h-[calc(100vh)] max-w-max_width md:h-screen">
-      {/* Column 1: Query History */}
-      <aside className="relative z-10 hidden w-[300px] flex-col border-r border-outline-variant/10 bg-surface-container-lowest/30 shadow-[4px_0_24px_rgba(0,0,0,0.1)] backdrop-blur-md lg:flex">
-        <div className="flex items-center justify-between px-xl py-lg">
-          <h2 className="font-mono-sm text-[11px] font-medium uppercase tracking-[0.15em] text-on-surface-variant">
-            Recent Queries
-          </h2>
-          {history.length > 0 ? (
-            <button
-              type="button"
-              onClick={() => {
-                setHistory([]);
-                saveHistory([]);
-              }}
-              className="font-mono-sm text-[10px] uppercase tracking-wider text-on-surface-variant/60 transition-colors hover:text-error"
-            >
-              Clear
-            </button>
-          ) : null}
+    <div className="flex h-[calc(100vh-4rem)] w-full md:h-screen">
+      {/* Saved research */}
+      <aside
+        className={`${showSessions ? "fixed inset-x-0 bottom-0 top-16 z-40 flex" : "hidden"} w-full flex-col border-r border-outline-variant/20 bg-surface-container-lowest md:top-0 lg:static lg:flex lg:w-[280px] lg:bg-surface-container-lowest/40`}
+        aria-label="Saved research"
+      >
+        <div className="flex items-center justify-between gap-sm px-lg pb-md pt-lg">
+          <h2 className="font-label-md text-label-md font-semibold text-on-surface">Saved research</h2>
+          <button
+            type="button"
+            onClick={startNew}
+            disabled={busy}
+            className="flex items-center gap-xs rounded-lg border border-outline-variant/40 px-md py-xs font-label-md text-[13px] text-primary transition-colors hover:border-primary-fixed-dim/60 disabled:opacity-50"
+          >
+            <MaterialIcon name="add" size={16} />
+            New
+          </button>
         </div>
-        <div className="flex flex-1 flex-col gap-md overflow-y-auto px-lg pb-lg">
-          {history.length === 0 ? (
-            <p className="font-body-md text-body-md text-on-surface-variant/60">
-              Your research queries will appear here.
+        <div className="flex flex-1 flex-col gap-xs overflow-y-auto px-sm pb-lg">
+          {sessionsLoading ? (
+            <p className="px-md py-sm text-[14px] text-on-surface-variant/70">Loading…</p>
+          ) : sessionsError ? (
+            <p className="px-md py-sm text-[14px] text-error">{sessionsError}</p>
+          ) : sessions.length === 0 ? (
+            <p className="px-md py-sm text-[14px] leading-relaxed text-on-surface-variant/70">
+              Questions you ask are saved here, so you can come back and continue them.
             </p>
           ) : (
-            history.map((entry) => {
-              const active = entry.id === activeId;
-              return (
-                <button
-                  key={entry.id}
-                  type="button"
-                  onClick={() => {
-                    setActiveId(entry.id);
-                    setActiveQuestion(entry.question);
-                    void submitPrompt(entry.question);
-                  }}
-                  className={
-                    active
-                      ? "flex w-full flex-col gap-md rounded-2xl border border-outline-variant/30 bg-gradient-to-br from-surface-container-high to-surface-container p-lg text-left text-primary shadow-lg transition-all"
-                      : "group flex w-full flex-col gap-md rounded-2xl border border-transparent bg-transparent p-lg text-left transition-all hover:border-outline-variant/10 hover:bg-surface-container-low/50"
-                  }
-                >
-                  <span
-                    className={`font-body-md text-body-md leading-tight ${
-                      active
-                        ? "font-medium"
-                        : "text-on-surface-variant group-hover:text-on-surface"
-                    }`}
-                  >
-                    {entry.question}
-                  </span>
-                  <span
-                    className={`font-mono-sm text-[11px] ${
-                      active ? "text-primary/70" : "text-on-surface-variant/60"
-                    }`}
-                  >
-                    Today, {entry.time}
-                  </span>
-                </button>
-              );
-            })
+            sessions.map((s) => (
+              <SessionRow
+                key={s.id}
+                session={s}
+                active={s.id === activeId}
+                disabled={busy}
+                onOpen={() => void openSession(s.id)}
+                onRename={async (title) => {
+                  const updated = await renameSession(s.id, title);
+                  setSessions((list) => list.map((x) => (x.id === s.id ? updated : x)));
+                }}
+                onDelete={async () => {
+                  await deleteSession(s.id);
+                  setSessions((list) => list.filter((x) => x.id !== s.id));
+                  if (s.id === activeId) startNew();
+                }}
+              />
+            ))
           )}
         </div>
       </aside>
 
-      {/* Column 2: Answer panel */}
-      <section className="relative z-0 flex min-w-0 flex-1 flex-col bg-surface">
-        <div className="flex-1 overflow-y-auto px-lg py-xl pb-[160px] md:px-[80px] md:py-[60px]">
-          <div className="flex max-w-3xl flex-col gap-[48px]">
-            <div className="flex flex-col gap-lg">
-              <h2 className="font-headline-lg text-headline-lg leading-tight tracking-tight text-on-surface">
-                {activeQuestion ?? "Ask a research question to begin"}
-              </h2>
-              {activeQuestion ? (
-                <div className="flex items-center gap-lg">
-                  <span className="flex items-center gap-sm rounded-lg border border-primary-container/20 bg-primary-container/5 px-md py-sm font-mono-sm text-mono-sm text-primary-fixed-dim shadow-sm backdrop-blur-sm">
-                    <MaterialIcon name="auto_awesome" size={16} className="text-primary-fixed" />
-                    AI Synthesis
-                  </span>
-                  {isStreaming ? (
-                    <span className="flex items-center gap-sm font-mono-sm text-mono-sm text-on-surface-variant">
-                      <span className="h-2 w-2 rounded-full bg-primary-fixed" />
-                      Synthesizing...
-                    </span>
-                  ) : null}
-                </div>
-              ) : null}
-            </div>
+      {/* Thread */}
+      <section className="relative flex min-w-0 flex-1 flex-col bg-surface">
+        <div className="flex items-center gap-md border-b border-outline-variant/15 px-lg py-md">
+          <button
+            type="button"
+            onClick={() => setShowSessions((v) => !v)}
+            className="rounded-lg p-xs text-on-surface-variant hover:bg-surface-container-high lg:hidden"
+            aria-label={showSessions ? "Hide saved research" : "Show saved research"}
+          >
+            <MaterialIcon name={showSessions ? "close" : "history"} size={20} />
+          </button>
+          <h1 className="truncate font-headline-md text-[18px] font-semibold text-on-surface">
+            {activeTitle ?? (turns.length ? turns[0].question : "Research")}
+          </h1>
+        </div>
 
-            {error ? (
-              <div className="rounded-2xl border border-error/30 bg-error-container/20 px-lg py-md font-body-md text-body-md text-error">
-                {error}
-              </div>
-            ) : null}
-
-            <article className="flex flex-col gap-lg font-body-lg text-[17px] leading-[1.8] text-on-surface/90">
-              {answer.trim().length > 0 ? (
-                answer.split("\n").map((line, index) => <AnswerLine key={index} line={line} />)
-              ) : (
-                <p className="font-light text-[19px] leading-[1.7] text-on-surface-variant">
-                  {isStreaming
-                    ? "Synthesizing an evidence-backed answer from your ingested corpus..."
-                    : "Responses stream from the backend retrieval and synthesis pipeline, with cited evidence shown on the right."}
-                </p>
-              )}
-              {isStreaming ? (
-                <span className="inline-block h-4 w-2 animate-pulse bg-primary-fixed align-middle" />
-              ) : null}
-            </article>
+        <div className="flex-1 overflow-y-auto px-lg pb-[180px] pt-xl md:px-xl">
+          <div className="mx-auto flex max-w-[720px] flex-col gap-[56px]">
+            {loadingSession ? (
+              <p className="text-on-surface-variant">Opening saved research…</p>
+            ) : turns.length === 0 ? (
+              <EmptyThread onPick={(q) => void submit(q)} disabled={busy} />
+            ) : (
+              turns.map((turn, i) => (
+                <TurnView
+                  key={turn.key}
+                  turn={turn}
+                  selected={shownTurn === turn}
+                  activeCitation={shownTurn === turn ? activeCitation : null}
+                  onSelect={() => {
+                    setSelected(i);
+                    setActiveCitation(null);
+                  }}
+                  onCite={(n) => cite(i, n)}
+                />
+              ))
+            )}
+            <div ref={threadEnd} />
           </div>
         </div>
 
-        {/* Fixed input */}
-        <div className="pointer-events-none absolute bottom-0 left-0 w-full bg-gradient-to-t from-surface via-surface/95 to-transparent p-lg pt-[80px] md:p-[40px]">
-          <div className="pointer-events-auto max-w-3xl">
-            <div className="relative overflow-hidden rounded-2xl border border-outline-variant/20 bg-surface-container-low/80 shadow-[0_8px_32px_rgba(0,0,0,0.3)] backdrop-blur-2xl transition-all duration-300 focus-within:border-primary-fixed/40 focus-within:ring-2 focus-within:ring-primary-fixed/20">
+        {/* Composer */}
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-surface via-surface/95 to-transparent px-lg pb-lg pt-[64px] md:px-xl">
+          <form
+            className="pointer-events-auto mx-auto max-w-[720px]"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void submit();
+            }}
+          >
+            <div className="flex items-end gap-sm rounded-2xl border border-outline-variant/30 bg-surface-container-low p-sm shadow-[0_12px_40px_rgba(0,8,20,0.5)] focus-within:border-primary-fixed-dim/50">
+              <label htmlFor="research-input" className="sr-only">
+                Ask a question about your documents
+              </label>
               <textarea
+                id="research-input"
+                ref={inputRef}
                 rows={1}
                 value={prompt}
-                onChange={(event) => setPrompt(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) {
-                    event.preventDefault();
-                    void submitPrompt();
+                onChange={(e) => setPrompt(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    void submit();
                   }
                 }}
-                placeholder="Ask a question about your documents..."
-                className="block w-full resize-none border-none bg-transparent p-lg font-body-lg text-[17px] text-on-surface placeholder-on-surface-variant/40 focus:ring-0 md:p-xl"
+                placeholder={turns.length ? "Ask a follow-up…" : "Ask about your documents…"}
+                className="max-h-40 min-h-[44px] flex-1 resize-none border-none bg-transparent px-md py-[10px] text-[16px] text-on-surface placeholder-on-surface-variant/50 focus:outline-none focus:ring-0"
               />
-              <div className="flex items-center justify-end px-lg pb-lg pt-sm">
-                <button
-                  type="button"
-                  onClick={() => void submitPrompt()}
-                  disabled={!prompt.trim() || isStreaming}
-                  className="flex items-center gap-sm rounded-xl bg-gradient-to-r from-primary-container to-primary px-xl py-md font-label-md text-label-md font-semibold tracking-wide text-on-primary-container transition-all duration-300 hover:-translate-y-0.5 hover:shadow-[0_0_16px_rgba(0,218,243,0.3)] disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {isStreaming ? "Streaming" : "Send"}
-                  <MaterialIcon name="send" size={18} />
-                </button>
-              </div>
+              <button
+                type="submit"
+                disabled={!prompt.trim() || busy}
+                className="flex h-[44px] items-center gap-xs rounded-xl bg-primary-fixed-dim px-lg font-label-md text-label-md font-semibold text-on-primary-fixed transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {busy ? "Answering" : "Ask"}
+                <MaterialIcon name="arrow_upward" size={18} />
+              </button>
             </div>
-          </div>
+            <p className="mt-xs px-sm text-[12px] text-on-surface-variant/60">
+              Answers use only your workspace&apos;s documents. Follow-ups remember this conversation.
+            </p>
+          </form>
         </div>
       </section>
 
-      {/* Column 3: Sources */}
-      <aside className="relative z-10 hidden w-[360px] flex-col border-l border-outline-variant/10 bg-surface-container-lowest/30 shadow-[-4px_0_24px_rgba(0,0,0,0.1)] backdrop-blur-md xl:flex">
-        <div className="flex items-center justify-between px-xl py-lg">
-          <h2 className="font-mono-sm text-[11px] font-medium uppercase tracking-[0.15em] text-on-surface-variant">
-            Evidence &amp; Sources
-          </h2>
+      {/* Evidence */}
+      <aside
+        className="hidden w-[360px] flex-col border-l border-outline-variant/20 bg-surface-container-lowest/40 xl:flex"
+        aria-label="Evidence"
+      >
+        <div className="px-lg pb-md pt-lg">
+          <h2 className="font-label-md text-label-md font-semibold text-on-surface">Evidence</h2>
+          <p className="mt-xs text-[13px] text-on-surface-variant/70">
+            {shownTurn ? `Sources for: ${shownTurn.question}` : "Passages behind each answer appear here."}
+          </p>
         </div>
-        <div className="flex flex-1 flex-col gap-lg overflow-y-auto px-lg pb-xl">
-          {citations.length === 0 ? (
-            <p className="font-body-md text-body-md text-on-surface-variant/60">
-              Cited sources from retrieved documents will appear here after a query.
-            </p>
-          ) : (
-            citations.map((cite, index) => (
-              <div
-                key={`${cite.title}-${index}`}
-                className="group relative overflow-hidden rounded-2xl border border-outline-variant/20 bg-gradient-to-br from-surface-container-low to-surface/40 p-lg shadow-lg transition-all duration-300 hover:border-primary-fixed/30"
-              >
-                <div className="absolute -right-10 -top-10 h-32 w-32 rounded-full bg-primary-fixed/5 blur-2xl transition-all group-hover:bg-primary-fixed/10" />
-                <div className="relative mb-lg flex items-center gap-md">
-                  <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-outline-variant/20 bg-surface-container-high font-mono-sm text-primary-fixed shadow-sm">
-                    {index + 1}
-                  </span>
-                  <span className="font-mono-sm text-[11px] uppercase tracking-wider text-on-surface-variant">
-                    {cite.source_type} · chunk {cite.chunk_index}
-                  </span>
-                </div>
-                <h4 className="relative mb-sm font-body-md text-body-md font-medium leading-tight text-on-surface transition-colors group-hover:text-primary-fixed-dim">
-                  {cite.title}
-                </h4>
-              </div>
-            ))
-          )}
+        <div className="flex flex-1 flex-col gap-md overflow-y-auto px-lg pb-xl">
+          {shownTurn && shownTurn.citations.length > 0
+            ? shownTurn.citations.map((c, i) => (
+                <EvidenceCard key={c.chunk_id || i} citation={c} index={i + 1} active={activeCitation === i + 1} anchor />
+              ))
+            : shownTurn && !shownTurn.streaming
+              ? <p className="text-[14px] text-on-surface-variant/70">This answer has no supporting passages.</p>
+              : null}
         </div>
       </aside>
     </div>
   );
 }
 
-function AnswerLine({ line }: { line: string }) {
-  if (line.startsWith("### ")) {
-    return (
-      <h3 className="font-headline-md text-headline-md font-medium text-on-surface">
-        {line.replace("### ", "")}
-      </h3>
-    );
-  }
-  if (line.startsWith("- ")) {
-    return (
-      <li className="relative ml-5 list-disc leading-[1.7] text-on-surface/90">
-        {line.replace("- ", "")}
-      </li>
-    );
-  }
-  if (!line.trim()) return <div className="h-1" />;
-  return <p className="font-light leading-[1.7] text-on-surface">{line}</p>;
+function EmptyThread({ onPick, disabled }: { onPick: (q: string) => void; disabled: boolean }) {
+  return (
+    <div className="flex flex-col gap-lg pt-xl">
+      <h2 className="max-w-[18ch] font-headline-lg text-[34px] font-semibold leading-[1.15] tracking-tight text-on-surface">
+        Ask anything your documents can answer.
+      </h2>
+      <p className="max-w-[56ch] text-[16px] leading-relaxed text-on-surface-variant">
+        Every answer cites the passages it came from, with page numbers or audio timestamps. If your documents
+        don&apos;t contain the answer, OMERO says so instead of guessing.
+      </p>
+      <div className="flex flex-col items-start gap-sm">
+        {EXAMPLES.map((q) => (
+          <button
+            key={q}
+            type="button"
+            disabled={disabled}
+            onClick={() => onPick(q)}
+            className="rounded-xl border border-outline-variant/30 px-md py-sm text-left text-[15px] text-on-surface-variant transition-colors hover:border-primary-fixed-dim/50 hover:text-on-surface disabled:opacity-50"
+          >
+            {q}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
 }
 
-type SseHandlers = {
-  onDelta: (delta: string) => void;
-  onDone: (payload: Record<string, unknown>) => void;
-};
+function TurnView({
+  turn,
+  selected,
+  activeCitation,
+  onSelect,
+  onCite
+}: {
+  turn: Turn;
+  selected: boolean;
+  activeCitation: number | null;
+  onSelect: () => void;
+  onCite: (n: number) => void;
+}) {
+  const body = answerBody(turn.answer);
+  const noData = turn.status === "no_data";
+  return (
+    <article className="flex flex-col gap-lg" aria-busy={turn.streaming}>
+      <div className="flex items-start justify-between gap-md">
+        <h2 className="text-[21px] font-semibold leading-snug tracking-tight text-on-surface">{turn.question}</h2>
+        {!selected && !turn.streaming && turn.citations.length > 0 ? (
+          <button
+            type="button"
+            onClick={onSelect}
+            className="mt-[4px] hidden shrink-0 rounded-lg px-sm py-[2px] text-[13px] text-primary-fixed-dim hover:bg-surface-container-high xl:inline-flex"
+          >
+            Show sources
+          </button>
+        ) : null}
+      </div>
+      <div
+        className={`-mx-md rounded-2xl border-l-2 px-md transition-colors ${
+          selected ? "border-primary-fixed-dim/70" : "border-transparent"
+        }`}
+      >
+        {turn.error ? (
+          <p role="alert" className="rounded-xl border border-error/30 bg-error-container/20 px-md py-sm text-[15px] text-error">
+            {turn.error}
+          </p>
+        ) : body ? (
+          <div className={noData ? "text-on-surface-variant" : undefined}>
+            {noData ? (
+              <p className="mb-sm flex items-center gap-xs text-[13px] font-medium text-on-surface-variant">
+                <MaterialIcon name="search_off" size={16} />
+                Not enough evidence
+              </p>
+            ) : null}
+            <AnswerMarkdown
+              markdown={body}
+              citationCount={turn.streaming ? 0 : turn.citations.length}
+              activeCitation={activeCitation}
+              onCite={onCite}
+            />
+          </div>
+        ) : (
+          <p className="flex items-center gap-sm text-[15px] text-on-surface-variant">
+            <span className="h-2 w-2 animate-pulse rounded-full bg-primary-fixed-dim" />
+            Searching your documents…
+          </p>
+        )}
+        {turn.streaming && body ? (
+          <span className="ml-xs inline-block h-4 w-[3px] animate-pulse bg-primary-fixed-dim align-middle" />
+        ) : null}
+      </div>
+      {/* Evidence inline on screens without the side column */}
+      {turn.citations.length > 0 ? (
+        <details className="xl:hidden">
+          <summary className="cursor-pointer text-[14px] text-primary-fixed-dim">
+            {turn.citations.length} source{turn.citations.length === 1 ? "" : "s"}
+          </summary>
+          <div className="mt-md flex flex-col gap-md">
+            {turn.citations.map((c, i) => (
+              <EvidenceCard key={c.chunk_id || i} citation={c} index={i + 1} active={false} />
+            ))}
+          </div>
+        </details>
+      ) : null}
+    </article>
+  );
+}
 
-async function consumeSse(
-  body: ReadableStream<Uint8Array>,
-  handlers: SseHandlers
-): Promise<void> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let separatorIndex = buffer.indexOf("\n\n");
-    while (separatorIndex !== -1) {
-      const rawEvent = buffer.slice(0, separatorIndex);
-      buffer = buffer.slice(separatorIndex + 2);
-      handleSseEvent(rawEvent, handlers);
-      separatorIndex = buffer.indexOf("\n\n");
+function SessionRow({
+  session,
+  active,
+  disabled,
+  onOpen,
+  onRename,
+  onDelete
+}: {
+  session: SessionSummary;
+  active: boolean;
+  disabled: boolean;
+  onOpen: () => void;
+  onRename: (title: string) => Promise<void>;
+  onDelete: () => Promise<void>;
+}) {
+  const [mode, setMode] = useState<"view" | "rename" | "confirm">("view");
+  const [title, setTitle] = useState(session.title);
+  const [error, setError] = useState<string | null>(null);
+
+  async function run(action: () => Promise<void>) {
+    try {
+      await action();
+      setMode("view");
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "That did not work. Try again.");
     }
   }
-}
 
-function handleSseEvent(rawEvent: string, handlers: SseHandlers): void {
-  let eventType = "message";
-  const dataLines: string[] = [];
-  for (const line of rawEvent.split("\n")) {
-    if (line.startsWith("event:")) eventType = line.slice("event:".length).trim();
-    else if (line.startsWith("data:")) dataLines.push(line.slice("data:".length).trim());
+  if (mode === "rename") {
+    return (
+      <form
+        className="rounded-xl bg-surface-container-high px-md py-sm"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (title.trim()) void run(() => onRename(title.trim()));
+        }}
+      >
+        <label className="sr-only" htmlFor={`rename-${session.id}`}>
+          Research title
+        </label>
+        <input
+          id={`rename-${session.id}`}
+          autoFocus
+          value={title}
+          maxLength={120}
+          onChange={(e) => setTitle(e.target.value)}
+          onKeyDown={(e) => e.key === "Escape" && setMode("view")}
+          className="w-full rounded-md border border-outline-variant/40 bg-surface px-sm py-xs text-[14px] text-on-surface focus:border-primary-fixed-dim focus:outline-none"
+        />
+        <div className="mt-xs flex gap-sm text-[13px]">
+          <button type="submit" className="text-primary-fixed-dim">Save</button>
+          <button type="button" onClick={() => setMode("view")} className="text-on-surface-variant">Cancel</button>
+        </div>
+        {error ? <p className="mt-xs text-[12px] text-error">{error}</p> : null}
+      </form>
+    );
   }
-  if (dataLines.length === 0) return;
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(dataLines.join("\n")) as Record<string, unknown>;
-  } catch {
-    return;
-  }
-  if (eventType === "delta" && typeof parsed.delta === "string") handlers.onDelta(parsed.delta);
-  else if (eventType === "done") handlers.onDone(parsed);
+
+  return (
+    <div
+      className={`group relative rounded-xl transition-colors ${
+        active ? "bg-surface-container-high" : "hover:bg-surface-container-low"
+      }`}
+    >
+      <button
+        type="button"
+        onClick={onOpen}
+        disabled={disabled && !active}
+        className="flex w-full flex-col gap-[2px] px-md py-sm pr-[64px] text-left"
+      >
+        <span className={`line-clamp-2 text-[14px] leading-snug ${active ? "text-on-surface" : "text-on-surface-variant"}`}>
+          {session.title}
+        </span>
+        <span className="text-[12px] text-on-surface-variant/60">{relativeTime(session.updated_at)}</span>
+      </button>
+      {mode === "confirm" ? (
+        <div className="flex items-center gap-sm px-md pb-sm text-[13px]">
+          <span className="text-on-surface-variant">Delete this research?</span>
+          <button type="button" disabled={disabled} onClick={() => void run(onDelete)} className="text-error disabled:opacity-50">
+            Delete
+          </button>
+          <button type="button" onClick={() => setMode("view")} className="text-on-surface-variant">Keep</button>
+        </div>
+      ) : disabled ? null : (
+        // Hidden while an answer streams: renaming or deleting mid-answer would
+        // leave the open conversation pointing at a session that changed.
+        <div className="absolute right-xs top-xs flex opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+          <button
+            type="button"
+            onClick={() => {
+              setTitle(session.title);
+              setMode("rename");
+            }}
+            aria-label={`Rename ${session.title}`}
+            className="rounded-md p-xs text-on-surface-variant hover:text-on-surface"
+          >
+            <MaterialIcon name="edit" size={16} />
+          </button>
+          <button
+            type="button"
+            onClick={() => setMode("confirm")}
+            aria-label={`Delete ${session.title}`}
+            className="rounded-md p-xs text-on-surface-variant hover:text-error"
+          >
+            <MaterialIcon name="delete" size={16} />
+          </button>
+        </div>
+      )}
+      {error ? <p className="px-md pb-sm text-[12px] text-error">{error}</p> : null}
+    </div>
+  );
 }

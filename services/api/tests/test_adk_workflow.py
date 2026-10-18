@@ -91,7 +91,10 @@ class AdkWorkflowTest(unittest.TestCase):
         )
 
         self.assertEqual(result.response.status, "no_data")
-        self.assertIn("External delegation did not return usable findings", result.response.answer_markdown)
+        # With no external research provider configured, the answer says so
+        # rather than implying an external search ran.
+        self.assertIn("External research is not turned on", result.response.answer_markdown)
+        self.assertNotIn("did not return usable findings", result.response.answer_markdown)
         self.assertEqual(result.trace[2]["node"], "detect_missing_data")
         self.assertIn("insufficient", result.trace[2]["detail"])
         self.assertEqual(result.trace[3]["node"], "delegate_external_research")

@@ -14,3 +14,8 @@ if (!globalThis.crypto || !globalThis.crypto.randomUUID) {
     writable: true,
   });
 }
+
+// jsdom has no layout, so scrolling is a no-op.
+if (typeof Element !== "undefined" && !Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = function scrollIntoView() {};
+}

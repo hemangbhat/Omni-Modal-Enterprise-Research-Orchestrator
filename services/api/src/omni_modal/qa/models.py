@@ -18,11 +18,21 @@ class SourceReference:
     segment_index: int | None = None
     start_ms: int | None = None
     end_ms: int | None = None
+    # The passage text that supports the claim, trimmed for display.
+    snippet: str = ""
+    # "internal" for the tenant's own documents; external research is labelled separately.
+    scope: str = "internal"
+    # Whether the answer text actually cites this passage.
+    cited: bool = False
 
     def citation_label(self, index: int) -> str:
         location = ""
         if self.page_number is not None:
             location = f", p. {self.page_number}"
+        elif self.start_ms is not None:
+            location = f", {format_timestamp(self.start_ms)}"
+            if self.end_ms is not None:
+                location += f"–{format_timestamp(self.end_ms)}"
         elif self.segment_index is not None:
             location = f", segment {self.segment_index}"
         return f"[{index}] {self.title}{location}"
@@ -39,7 +49,7 @@ class RetrievedChunk:
     similarity: float
     metadata: dict[str, str | int | float | bool] = field(default_factory=dict)
 
-    def source_reference(self) -> SourceReference:
+    def source_reference(self, *, snippet: str = "", cited: bool = False) -> SourceReference:
         return SourceReference(
             document_id=self.document_id,
             chunk_id=self.chunk_id,
@@ -54,6 +64,8 @@ class RetrievedChunk:
             or _optional_int(self.metadata.get("start_ms")),
             end_ms=_optional_int(self.metadata.get("endMs"))
             or _optional_int(self.metadata.get("end_ms")),
+            snippet=snippet,
+            cited=cited,
         )
 
 
@@ -65,6 +77,14 @@ class QueryRequest:
     top_k: int = 5
     min_similarity: float = 0.0
     stream: bool = False
+    # Earlier turns of the conversation, oldest first, as (role, content).
+    history: tuple[tuple[str, str], ...] = ()
+    # Standalone rewrite of a follow-up question, used for retrieval only.
+    search_query: str | None = None
+
+    @property
+    def retrieval_text(self) -> str:
+        return self.search_query or self.question
 
 
 @dataclass(frozen=True)
@@ -85,6 +105,13 @@ class QueryResponse:
             "retrieved_chunks": [asdict(chunk) for chunk in self.retrieved_chunks],
             "error_message": self.error_message,
         }
+
+
+def format_timestamp(ms: int) -> str:
+    seconds = max(0, ms) // 1000
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
 
 
 def _optional_int(value: object) -> int | None:

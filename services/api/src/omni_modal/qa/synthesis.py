@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-import re
+from collections.abc import Iterator
 
-from omni_modal.qa.models import QueryRequest, QueryResponse, RetrievedChunk, SourceReference
+from omni_modal.qa.citations import best_excerpt
+from omni_modal.qa.models import QueryRequest, QueryResponse, RetrievedChunk
 
 
 class ExtractiveAnswerSynthesizer:
+    """No-LLM answers: the most relevant sentence of each retrieved passage."""
+
     def synthesize(
         self, request: QueryRequest, chunks: list[RetrievedChunk]
     ) -> QueryResponse:
@@ -22,11 +25,13 @@ class ExtractiveAnswerSynthesizer:
                 retrieved_chunks=[],
             )
 
-        citations = [chunk.source_reference() for chunk in chunks]
+        query = request.retrieval_text
         bullets = []
+        citations = []
         for index, chunk in enumerate(chunks, start=1):
-            excerpt = _best_excerpt(chunk.content, request.question)
+            excerpt = best_excerpt(chunk.content, query, limit=420)
             bullets.append(f"- {excerpt} [{index}]")
+            citations.append(chunk.source_reference(snippet=best_excerpt(chunk.content, query), cited=True))
 
         sources = [
             f"{index}. {citation.citation_label(index)}"
@@ -47,27 +52,16 @@ class ExtractiveAnswerSynthesizer:
             retrieved_chunks=chunks,
         )
 
+    def synthesize_stream(
+        self, request: QueryRequest, chunks: list[RetrievedChunk]
+    ) -> Iterator[str | QueryResponse]:
+        """There is no model to stream from, so stream the finished text."""
+        response = self.synthesize(request, chunks)
+        yield from stream_markdown(response.answer_markdown)
+        yield response
+
 
 def stream_markdown(markdown: str, chunk_size: int = 80) -> list[str]:
     if chunk_size < 1:
         raise ValueError("chunk_size must be greater than zero.")
     return [markdown[index : index + chunk_size] for index in range(0, len(markdown), chunk_size)]
-
-
-def _best_excerpt(content: str, question: str) -> str:
-    sentences = re.split(r"(?<=[.!?])\s+", content.strip())
-    if not sentences:
-        return content.strip()
-
-    terms = {term.lower() for term in re.findall(r"[A-Za-z0-9_]+", question)}
-    ranked = sorted(
-        sentences,
-        key=lambda sentence: sum(
-            1 for term in re.findall(r"[A-Za-z0-9_]+", sentence.lower()) if term in terms
-        ),
-        reverse=True,
-    )
-    excerpt = ranked[0].strip() if ranked else content.strip()
-    if len(excerpt) <= 420:
-        return excerpt
-    return excerpt[:417].rstrip() + "..."

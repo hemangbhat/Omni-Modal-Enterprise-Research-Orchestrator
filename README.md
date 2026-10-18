@@ -8,10 +8,11 @@ A multi-tenant enterprise research platform that ingests PDF and audio documents
 
 - **Full-stack architecture** — Next.js 16 App Router frontend + Python FastAPI backend in a monorepo
 - **Vector search** — pgvector cosine-similarity retrieval with HNSW index tuning
+- **Grounded research chat** — saved multi-turn sessions, follow-up questions, token-by-token streaming from the model, and citations checked against the retrieved passages; plus a read-only assistant on every page
 - **Observability** — Sentry distributed tracing across frontend and backend, property-based tests for correctness
 - **Enterprise security** — JWT authentication, RBAC, document-level access control, PII scrubbing, rate limiting, content redaction before external delegation
 - **Performance** — async ingestion queue, connection pooling, query result caching, batch embedding writes
-- **Test quality** — 567 backend tests (unit, HTTP integration, Hypothesis property-based) and 95 frontend tests (API clients and screen-level tests of the sign-in, two-step sign-in and password-reset screens); CI is configured to run both suites
+- **Test quality** — 633 backend tests (unit, HTTP integration, Hypothesis property-based) and 112 frontend tests (API clients and screen-level tests of sign-in, two-step sign-in, password reset, research and the assistant); CI is configured to run both suites
 - **Works locally without a database** — a Postgres-free in-memory path wires ingestion → persistence → retrieval end-to-end so the demo runs out of the box (with a deterministic, non-semantic embedder)
 
 ---
@@ -204,10 +205,28 @@ python -m omni_modal.main         # HTTP server at http://localhost:8000
 
 Reset links are built from `APP_BASE_URL`, so set it to the frontend's public address in deployment. Without `RESEND_API_KEY` the email is only logged by the console adapter.
 
+### Research and assistant endpoints
+
+| Endpoint | What it does |
+|---|---|
+| `POST /query/stream` | Answers a question as server-sent events: `session`, then `delta` events carrying model tokens as the provider sends them, then `done` with the checked answer and citations. Pass `session_id` to ask a follow-up; without it a new saved session is created |
+| `GET/POST /research/sessions`, `GET/PATCH/DELETE /research/sessions/{id}` | List, create, open, rename and delete saved conversations. Sessions are private to the user who made them; anyone else gets 404 |
+| `POST /assistant/stream` | The site-wide assistant. Same event stream, plus `tool` events naming what it looked up |
+
+How an answer is built:
+
+- **Follow-ups.** Earlier turns are used to rewrite a follow-up ("and headcount?") into a standalone search query before retrieval. The model also sees the conversation. Without a model key, the previous question is prepended instead.
+- **Real streaming.** Groq and Gemini are called with their streaming APIs, so the first words appear while the rest is still being generated. The extractive fallback streams its finished text.
+- **Checked citations.** The model cites passages as `[n]`. Numbers outside the retrieved set are removed, each passage is marked cited or not, and each citation carries the document title, page number or audio time range, and the sentence that supports the claim.
+- **No guessing.** When the passages do not answer the question, the reply says so and carries no citations.
+- **Assistant safety.** The assistant is read-only. Which tools run (search documents, list documents, usage and plan, team members, suggest a page) is decided by rules applied to the user's own message, not by the model, so text inside a document cannot trigger anything. Each tool applies the same role checks as the matching API endpoint, and tool output reaches the model marked as untrusted data. Without a model key it says so and shows what it found.
+
+Model defaults: `GROQ_MODEL=openai/gpt-oss-120b`, `GEMINI_MODEL=gemini-flash-latest`. Groq retired `llama-3.3-70b-versatile` and Google retired `gemini-2.0-flash`; with those names set, every request silently fell back to the extractive answer.
+
 ### Tests
 
 ```bash
-# Backend unit, property-based and HTTP integration tests (567 tests).
+# Backend unit, property-based and HTTP integration tests (633 tests).
 # The suite never reads your .env, so it does not use your real keys or database.
 cd services/api && python -m pytest tests
 

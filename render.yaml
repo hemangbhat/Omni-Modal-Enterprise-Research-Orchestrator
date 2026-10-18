@@ -20,7 +20,7 @@ services:
         sync: false   # free at console.groq.com
 
       - key: GROQ_MODEL
-        value: llama-3.3-70b-versatile
+        value: openai/gpt-oss-120b
 
       - key: LLM_ANSWER_GENERATION_ENABLED
         value: "true"
@@ -103,7 +103,7 @@ services:
       - key: GROQ_API_KEY
         sync: false
       - key: GROQ_MODEL
-        value: llama-3.3-70b-versatile
+        value: openai/gpt-oss-120b
       - key: EMBEDDING_BACKEND
         value: hashing
       - key: EMBEDDING_DIMENSIONS

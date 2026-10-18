@@ -8,6 +8,7 @@ RLS GUC-binding SQL without a database.
 from __future__ import annotations
 
 import importlib.util
+import re
 from pathlib import Path
 
 import _path  # noqa: F401
@@ -66,6 +67,43 @@ def test_auth_recovery_migration_follows_rls_and_defines_both_tables():
     assert "CREATE TABLE IF NOT EXISTS user_mfa" in sql
     assert "CREATE TABLE IF NOT EXISTS password_reset_tokens" in sql
     assert "CREATE POLICY tenant_isolation ON user_mfa" in sql
+
+
+def _array_tables(sql: str) -> set[str]:
+    """Table names listed in a migration's `tenant_tables text[] := ARRAY[...]`."""
+    body = re.search(r"tenant_tables\s+text\[\]\s*:=\s*ARRAY\[(.*?)\];", sql, re.S)
+    assert body, "migration has no tenant_tables array"
+    no_comments = re.sub(r"--[^\n]*", "", body.group(1))
+    return set(re.findall(r"'(\w+)'", no_comments))
+
+
+def test_empty_guc_migration_rebuilds_every_earlier_rls_policy_with_nullif():
+    # After a SET LOCAL transaction commits, a pooled connection reports
+    # app.tenant_id as '' rather than NULL; 0008/0009's `IS NULL` escape then
+    # stops matching. 0011 must recreate every one of those policies so that
+    # '' also counts as "no tenant bound".
+    migrate = _load_migrate()
+    files = migrate.discover_migrations(migrate.MIGRATIONS_DIR)
+    names = [p.name for p in files]
+    assert "0011_rls_empty_guc.sql" in names
+    assert names.index("0010_research_sessions.sql") < names.index("0011_rls_empty_guc.sql")
+
+    def read(name: str) -> str:
+        return next(p for p in files if p.name == name).read_text(encoding="utf-8")
+
+    earlier = _array_tables(read("0008_rls.sql")) | set(
+        re.findall(r"CREATE POLICY tenant_isolation ON (\w+)", read("0009_auth_recovery.sql"))
+    )
+    assert "users" in earlier and "user_mfa" in earlier
+
+    sql = read("0011_rls_empty_guc.sql")
+    assert _array_tables(sql) >= earlier
+    nullif = "NULLIF(current_setting(''app.tenant_id'', true), '''') IS NULL"
+    assert f"USING ({nullif}" in sql
+    assert f"WITH CHECK ({nullif}" in sql
+    # No policy body may keep the bare NULL test that misses the empty string.
+    assert "'USING (current_setting" not in sql
+    assert "WITH CHECK (current_setting" not in sql
 
 
 # ── RLS helper ──────────────────────────────────────────────────────────────

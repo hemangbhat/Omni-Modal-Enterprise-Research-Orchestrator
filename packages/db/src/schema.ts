@@ -15,6 +15,7 @@ import {
   uuid,
   varchar
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 export const documentStatus = pgEnum("document_status", [
   "uploaded",
@@ -136,13 +137,42 @@ export const documents = pgTable(
     metadata: jsonb("metadata").$type<DocumentMetadata>().notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-    processedAt: timestamp("processed_at", { withTimezone: true })
+    processedAt: timestamp("processed_at", { withTimezone: true }),
+    fileName: text("file_name"),
+    contentType: text("content_type"),
+    sizeBytes: bigint("size_bytes", { mode: "number" }),
+    contentHash: varchar("content_hash", { length: 64 }),
+    storageKey: text("storage_key"),
+    uploadedBy: text("uploaded_by"),
+    errorMessage: text("error_message")
   },
   (table) => ({
     tenantIdx: index("documents_tenant_idx").on(table.tenantId),
     ownerIdx: index("documents_owner_idx").on(table.ownerId),
     statusIdx: index("documents_status_idx").on(table.status),
-    sourceTypeIdx: index("documents_source_type_idx").on(table.sourceType)
+    sourceTypeIdx: index("documents_source_type_idx").on(table.sourceType),
+    tenantContentHash: uniqueIndex("documents_tenant_content_hash_unique")
+      .on(table.tenantId, table.contentHash)
+      .where(sql`content_hash IS NOT NULL`)
+  })
+);
+
+export const ingestionJobs = pgTable(
+  "ingestion_jobs",
+  {
+    id: text("id").primaryKey(),
+    tenantId: varchar("tenant_id", { length: 128 }).notNull(),
+    documentId: uuid("document_id")
+      .notNull()
+      .references(() => documents.id, { onDelete: "cascade" }),
+    stage: text("stage").notNull(),
+    attempts: integer("attempts").notNull().default(0),
+    errorMessage: text("error_message"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => ({
+    documentIdx: index("ingestion_jobs_document_idx").on(table.tenantId, table.documentId, table.createdAt)
   })
 );
 

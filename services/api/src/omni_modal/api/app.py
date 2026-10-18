@@ -4,29 +4,27 @@ existing domain services so behaviour matches the stdlib server exactly."""
 from __future__ import annotations
 
 import base64
+import hashlib
+import tempfile
 import json
 import os
-import tempfile
 import time
-import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from omni_modal.entity_extraction.service import EntityExtractionService
 from omni_modal.ingestion import MultimodalIngestionPipeline
-from omni_modal.ingestion.async_queue import AsyncIngestionQueue
-from omni_modal.ingestion.redis_queue import select_ingestion_queue
-from omni_modal.ingestion.extractors import LocalWhisperTranscriber
-from omni_modal.ingestion.http_contract import (
-    IngestionContractError,
-    ingestion_request_from_payload,
-)
+from omni_modal.documents.dispatch import InProcessDispatcher
+from omni_modal.documents.service import DocumentService, Forbidden, InvalidState, UploadRejected
+from omni_modal.documents.store import DocumentNotFound, select_document_store
+from omni_modal.ingestion.groq_transcriber import select_audio_transcriber
 from omni_modal.observability import observability
 from omni_modal.orchestration import InternalResearchAdkWorkflow, Phase1Orchestrator
 from omni_modal.orchestration.adk_workflow import AgentWorkflowResult
@@ -47,6 +45,7 @@ from omni_modal.qa.in_memory_store import (
     InMemoryVectorStore,
 )
 from omni_modal.saas import get_saas_service
+from omni_modal.saas.adapters.storage import safe_download_name
 from omni_modal.saas.plans import PLANS, PlanLimitExceeded
 from omni_modal.security.accounts import AccountError, get_account_service
 from omni_modal.security.auth import AuthError, JwtClaims, _make_jwt, jwt_secret_from_env, verify_jwt
@@ -180,10 +179,20 @@ class NotificationsReadRequest(BaseModel):
 
 
 class UploadRequest(BaseModel):
-    filename: str
-    content_base64: str
+    filename: str = Field(..., max_length=300)
+    # Base64 of at most the 50 MB upload limit; anything longer is refused unread.
+    content_base64: str = Field(..., max_length=69905068)
     source_kind: str | None = None
-    title: str | None = None
+    title: str | None = Field(None, max_length=300)
+    workspace_id: str | None = None
+
+
+class CreateUploadRequest(BaseModel):
+    filename: str = Field(..., min_length=1, max_length=300)
+    size_bytes: int = Field(..., ge=1)
+    content_type: str = Field("application/octet-stream", max_length=200)
+    sha256: str = Field(..., min_length=64, max_length=64)
+    title: str | None = Field(None, max_length=300)
     workspace_id: str | None = None
 
 
@@ -202,6 +211,8 @@ class _State:
     mfa: Any = None
     password_resets: Any = None
     retriever: Any = None
+    documents: Any = None
+    dispatcher: Any = None
     research_sessions: Any = None
     rewriter: Any = None
     assistant: Any = None
@@ -216,8 +227,9 @@ def _build_runtime() -> None:
     in-memory demo path."""
     selection = select_embedding_provider()
     provider = selection.provider
-    whisper_model = os.environ.get("WHISPER_MODEL_PATH") or None
-    audio = LocalWhisperTranscriber(model=whisper_model) if whisper_model else None
+    # Local Whisper when installed, else Groq's hosted Whisper (the deployment
+    # cannot run a local model), else a clear "Whisper is not installed" error.
+    audio = select_audio_transcriber()
     state.entity_service = EntityExtractionService()
 
     # Shared coordination primitives — Redis-backed when REDIS_URL is set
@@ -230,33 +242,47 @@ def _build_runtime() -> None:
 
         state.vector_store = None
         retriever = PgVectorChunkRetriever(provider, cache=state.query_cache)
-        pipeline = MultimodalIngestionPipeline(
-            audio_transcriber=audio,
-            persistence=PostgresChunkPersistence(
-                provider, database_url=os.environ.get("DATABASE_URL"),
-                embedding_model=selection.backend,
-                dimensions=getattr(provider, "dimensions", 384),
-            ),
+        persistence = PostgresChunkPersistence(
+            provider, database_url=os.environ.get("DATABASE_URL"),
+            embedding_model=selection.backend,
+            dimensions=getattr(provider, "dimensions", 384),
+            require_document=True,
         )
+        pipeline = MultimodalIngestionPipeline(audio_transcriber=audio, persistence=persistence)
+        # Chunks of a deleted document go by cascade; a failed one is cleared explicitly.
+        clear_index = persistence.delete_document_chunks
     else:
         state.vector_store = InMemoryVectorStore()
         retriever = InMemoryChunkRetriever(provider, state.vector_store)
-        pipeline = MultimodalIngestionPipeline(
-            audio_transcriber=audio,
-            persistence=InMemoryChunkPersistence(state.vector_store, provider),
-        )
+        persistence = InMemoryChunkPersistence(state.vector_store, provider)
+        pipeline = MultimodalIngestionPipeline(audio_transcriber=audio, persistence=persistence)
+        clear_index = state.vector_store.remove_document
 
-    state.queue = select_ingestion_queue(
-        pipeline,
-        cache_evict_callback=state.query_cache.evict_tenant,
+    state.saas = get_saas_service()
+    state.documents = DocumentService(
+        store=select_document_store(),
+        storage=state.saas.storage,
+        pipeline=pipeline,
+        remove_vectors=clear_index,
         entity_service=state.entity_service,
+        evict_cache=state.query_cache.evict_tenant,
+        notify=_notify_processing,
     )
-    state.queue.start_worker()
+    if state.dispatcher is not None:
+        state.dispatcher.stop(timeout=1.0)
+    if isinstance(persistence, InMemoryChunkPersistence):
+        persistence.document_exists = _document_exists
+    state.dispatcher = InProcessDispatcher(state.documents.run_job, sweep=state.documents.sweep)
+    state.documents.set_dispatch(state.dispatcher, state.dispatcher.later)
+    state.dispatcher.start()
+    try:
+        state.documents.resume_unfinished()
+    except Exception as exc:  # noqa: BLE001 - a resume problem must not stop the API starting
+        observability.capture_exception(exc, operation="documents.resume_unfinished")
     state.retriever = retriever
     state.workflow = InternalResearchAdkWorkflow(
         retriever, external_client_from_environment(), select_answer_synthesizer()
     )
-    state.saas = get_saas_service()
     chat_client = select_chat_client()
     state.research_sessions = select_research_session_service()
     state.rewriter = QueryRewriter(chat_client)
@@ -279,6 +305,33 @@ def _build_runtime() -> None:
     from omni_modal.security.pg_audit_sink import select_audit_sink  # noqa: PLC0415
 
     state.audit_sink = select_audit_sink()
+
+
+def _document_exists(tenant_id: str, document_id: str) -> bool:
+    try:
+        state.documents.get(tenant_id, document_id)
+        return True
+    except DocumentNotFound:
+        return False
+
+
+def _notify_processing(doc, outcome: str) -> None:
+    """Tell the uploader when their document is ready or has failed."""
+    try:
+        if outcome == "ready":
+            state.saas.notifications.add(
+                tenant_id=doc.tenant_id, title="Document ready",
+                body=f"'{doc.title}' has been processed and can be searched.", kind="success",
+                user_id=doc.uploaded_by,
+            )
+        else:
+            state.saas.notifications.add(
+                tenant_id=doc.tenant_id, title="Processing failed",
+                body=f"'{doc.title}' could not be processed. Open Documents for the reason.", kind="error",
+                user_id=doc.uploaded_by,
+            )
+    except Exception as exc:  # noqa: BLE001 - a notification must never fail processing
+        observability.capture_exception(exc, operation="documents.notify")
 
 
 class _SaasReader:
@@ -972,80 +1025,180 @@ def create_app() -> FastAPI:
         return {"marked_read": 1 if ok else 0}
 
     # ── Ingestion ────────────────────────────────────────────────────────
+    # ── Uploads and documents ────────────────────────────────────────────
+    # Plain ``def`` handlers run in a worker thread, so store and storage calls
+    # never block the event loop.
+    def _documents_call(fn, *args, **kwargs):
+        """Run a DocumentService call, turning its errors into HTTP answers."""
+        try:
+            return fn(*args, **kwargs)
+        except DocumentNotFound as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found.") from exc
+        except Forbidden as exc:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
+        except InvalidState as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+        except UploadRejected as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+    def _document_payload(doc, job) -> dict:
+        return {"document": doc.to_dict(), "job": job.to_dict() if job else None}
+
+    @app.post("/documents/uploads", tags=["documents"])
+    def create_upload(body: CreateUploadRequest, response: Response,
+                      claims: JwtClaims = Depends(require_roles("/ingest/upload"))) -> dict:
+        """Start an upload: returns where to send the file, or the existing copy of it."""
+        _documents_call(state.documents.validate_upload, file_name=body.filename,
+                        size_bytes=body.size_bytes, sha256=body.sha256)
+        if state.documents.find_duplicate(claims.tenant_id, body.sha256) is None:
+            meter(claims, "uploads")  # only valid, new documents count against the plan
+        slot = _documents_call(
+            state.documents.create_upload, claims.tenant_id, claims.user_id,
+            file_name=body.filename, size_bytes=body.size_bytes, content_type=body.content_type,
+            sha256=body.sha256, title=body.title,
+        )
+        if slot.duplicate:
+            _, job = state.documents.get(claims.tenant_id, slot.document.id)
+            return {**_document_payload(slot.document, job), "duplicate": True, "upload": None}
+        if body.workspace_id:
+            state.saas.tag_document(slot.document.id, body.workspace_id)
+        response.status_code = status.HTTP_201_CREATED
+        upload = (
+            {"method": "POST", "url": slot.upload["url"], "fields": slot.upload["fields"], "requires_auth": False}
+            if slot.upload
+            else {"method": "PUT", "url": f"/documents/{slot.document.id}/content", "requires_auth": True}
+        )
+        _, job = state.documents.get(claims.tenant_id, slot.document.id)
+        return {**_document_payload(slot.document, job), "duplicate": False, "resumed": slot.resumed,
+                "upload": upload}
+
+    @app.put("/documents/{document_id}/content", tags=["documents"])
+    async def upload_content(document_id: str, request: Request,
+                             claims: JwtClaims = Depends(require_roles("/ingest/upload"))) -> dict:
+        """Receive the file when no object store is configured.
+
+        Who may upload is checked before a byte is read; the body is streamed to
+        a temp file and reading stops as soon as it passes the declared size.
+        """
+        doc = await run_in_threadpool(
+            _documents_call, state.documents.check_can_upload, claims.tenant_id, claims.user_id, document_id,
+        )
+        too_large = HTTPException(413,
+                                  "The file is larger than the size declared for this upload.")
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > doc.size_bytes:
+            raise too_large
+        handle = tempfile.NamedTemporaryFile(delete=False, suffix=".upload")
+        path = Path(handle.name)
+        try:
+            total = 0
+            with handle:
+                async for part in request.stream():
+                    total += len(part)
+                    if total > doc.size_bytes:
+                        raise too_large
+                    handle.write(part)
+            stored = await run_in_threadpool(
+                _documents_call, state.documents.accept_file, claims.tenant_id, claims.user_id, document_id, path,
+            )
+        finally:
+            path.unlink(missing_ok=True)
+        return {"received_bytes": stored}
+
+    @app.post("/documents/{document_id}/complete", status_code=202, tags=["documents"])
+    def complete_upload(document_id: str, claims: JwtClaims = Depends(require_roles("/ingest/upload"))) -> dict:
+        doc, job = _documents_call(state.documents.complete_upload, claims.tenant_id, claims.user_id, document_id)
+        state.saas.analytics.capture(event="upload", tenant_id=claims.tenant_id, user_id=claims.user_id,
+                                     properties={"source_kind": doc.source_kind})
+        return _document_payload(doc, job)
+
+    @app.get("/documents/{document_id}", tags=["documents"])
+    def get_document(document_id: str, claims: JwtClaims = Depends(require_roles("/documents"))) -> dict:
+        doc, job = _documents_call(state.documents.get, claims.tenant_id, document_id)
+        return _document_payload(doc, job)
+
+    @app.delete("/documents/{document_id}", tags=["documents"])
+    def delete_document(document_id: str, claims: JwtClaims = Depends(require_roles("/documents/manage"))) -> dict:
+        _documents_call(state.documents.delete, claims.tenant_id, claims.user_id, claims.roles, document_id)
+        return {"deleted": True}
+
+    @app.post("/documents/{document_id}/reprocess", status_code=202, tags=["documents"])
+    def reprocess_document(document_id: str,
+                           claims: JwtClaims = Depends(require_roles("/documents/manage"))) -> dict:
+        job = _documents_call(state.documents.reprocess, claims.tenant_id, claims.user_id, claims.roles, document_id)
+        doc, _ = state.documents.get(claims.tenant_id, document_id)
+        return _document_payload(doc, job)
+
+    @app.get("/documents/{document_id}/download", tags=["documents"])
+    def download_document(document_id: str, claims: JwtClaims = Depends(require_roles("/documents"))) -> dict:
+        url, doc = _documents_call(state.documents.download, claims.tenant_id, document_id)
+        if url:
+            return {"url": url, "requires_auth": False, "expires_in": 300, "file_name": doc.file_name}
+        return {"url": f"/documents/{doc.id}/content", "requires_auth": True, "file_name": doc.file_name}
+
+    @app.get("/documents/{document_id}/content", tags=["documents"])
+    def document_content(document_id: str, claims: JwtClaims = Depends(require_roles("/documents"))):
+        """Serve the original file when no object store is configured."""
+        _, doc = _documents_call(state.documents.download, claims.tenant_id, document_id)
+        path = _documents_call(state.documents.local_path, claims.tenant_id, document_id)
+        return FileResponse(path, media_type=doc.content_type or "application/octet-stream",
+                            filename=safe_download_name(doc.file_name))
+
     @app.post("/ingest/upload", status_code=202, tags=["ingestion"])
-    async def ingest_upload(body: UploadRequest, claims: JwtClaims = Depends(require_roles("/ingest/upload"))) -> dict:
-        meter(claims, "uploads")
+    def ingest_upload(body: UploadRequest, claims: JwtClaims = Depends(require_roles("/ingest/upload"))) -> dict:
+        """One-call upload with the file inside the JSON body (scripts and API clients)."""
         try:
             content = base64.b64decode(body.content_base64, validate=True)
         except Exception as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "content_base64 is not valid base64.") from exc
-        suffix = Path(body.filename).suffix
-        upload_dir = Path(tempfile.gettempdir()) / "omni_modal_uploads"
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        document_id = str(uuid.uuid4())
-        dest = upload_dir / f"{document_id}{suffix}"
-        dest.write_bytes(content)
-        req = ingestion_request_from_payload({
-            "tenant_id": claims.tenant_id, "document_id": document_id, "owner_id": claims.user_id,
-            "file_path": str(dest), "source_kind": body.source_kind, "title": body.title or body.filename,
-        })
-        job = state.queue.enqueue(req)
-        if body.workspace_id:
-            state.saas.tag_document(document_id, body.workspace_id)
-        state.saas.analytics.capture(event="upload", tenant_id=claims.tenant_id, user_id=claims.user_id,
-                                     properties={"source_kind": body.source_kind or "pdf"})
-        state.saas.notifications.add(
-            tenant_id=claims.tenant_id, title="Upload received",
-            body=f"'{body.title or body.filename}' is being processed.", kind="info", user_id=claims.user_id,
+        digest = hashlib.sha256(content).hexdigest()
+        _documents_call(state.documents.validate_upload, file_name=body.filename,
+                        size_bytes=len(content), sha256=digest)
+        if state.documents.find_duplicate(claims.tenant_id, digest) is None:
+            meter(claims, "uploads")
+        doc, job, duplicate = _documents_call(
+            state.documents.ingest_bytes, claims.tenant_id, claims.user_id,
+            file_name=body.filename, data=content, title=body.title,
         )
-        return {"job_id": job.id, "status": job.status, "document_id": document_id}
+        if body.workspace_id and not duplicate:
+            state.saas.tag_document(doc.id, body.workspace_id)
+        if job is None:
+            _, job = state.documents.get(claims.tenant_id, doc.id)
+        return {"job_id": job.id if job else None, "status": job.to_dict()["status"] if job else doc.status,
+                "document_id": doc.id, "duplicate": duplicate}
 
     @app.post("/ingest/local", status_code=202, tags=["ingestion"])
-    async def ingest_local(request: Request, claims: JwtClaims = Depends(require_roles("/ingest/local"))) -> dict:
-        try:
-            payload = await request.json()
-        except Exception as exc:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid JSON body.") from exc
-        payload = {**payload, "tenant_id": claims.tenant_id, "owner_id": claims.user_id}
-        try:
-            req = ingestion_request_from_payload(payload)
-        except IngestionContractError as exc:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
-        job = state.queue.enqueue(req)
-        return {"job_id": job.id, "status": job.status}
+    def ingest_local(body: dict, claims: JwtClaims = Depends(require_roles("/ingest/local"))) -> dict:
+        """Ingest a file already on the server. Development only: it reads server paths."""
+        if os.environ.get("OMERO_ALLOW_LOCAL_INGEST", "false").lower() != "true":
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found.")
+        file_path = Path(str(body.get("file_path", "")))
+        if not file_path.is_file():
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "file_path must point to an existing file.")
+        doc, job, duplicate = _documents_call(
+            state.documents.ingest_bytes, claims.tenant_id, claims.user_id,
+            file_name=file_path.name, data=file_path.read_bytes(), title=body.get("title"),
+        )
+        if job is None:
+            _, job = state.documents.get(claims.tenant_id, doc.id)
+        return {"job_id": job.id if job else None, "status": job.to_dict()["status"] if job else doc.status,
+                "document_id": doc.id, "duplicate": duplicate}
 
     @app.get("/ingest/jobs/{job_id}", tags=["ingestion"])
-    async def job_status(job_id: str, claims: JwtClaims = Depends(current_claims)) -> dict:
-        job = state.queue.get(job_id)
-        if job is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Job not found.")
-        return {
-            "job_id": job.id, "status": job.status,
-            "document_id": job.request.document_id,
-            "error_code": job.error_code.value if job.error_code else None,
-            "error_message": job.error_message,
-        }
+    def job_status(job_id: str, claims: JwtClaims = Depends(current_claims)) -> dict:
+        try:
+            job = state.documents.get_job(claims.tenant_id, job_id)
+        except DocumentNotFound as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Job not found.") from exc
+        return {**job.to_dict(), "error_code": None}
 
     # ── Document views ───────────────────────────────────────────────────
     def _ws_filter(workspace_id: str | None):
         return state.saas.documents_in_workspace(workspace_id) if workspace_id else None
 
     @app.get("/documents", tags=["documents"])
-    async def documents(workspace_id: str | None = None, claims: JwtClaims = Depends(require_roles("/documents"))) -> dict:
-        wf = _ws_filter(workspace_id)
-        docs: list[dict] = []
-        if state.vector_store is not None:
-            seen: dict[str, dict] = {}
-            for chunk in state.vector_store.for_tenant(claims.tenant_id):
-                if wf is not None and chunk.document_id not in wf:
-                    continue
-                d = seen.setdefault(chunk.document_id, {
-                    "document_id": chunk.document_id, "title": chunk.title,
-                    "source_kind": chunk.source_type, "chunk_count": 0, "status": "ready"})
-                d["chunk_count"] += 1
-            docs = list(seen.values())
-        elif os.environ.get("DATABASE_URL"):
-            docs = _db_documents(claims.tenant_id, wf)
+    def documents(workspace_id: str | None = None, claims: JwtClaims = Depends(require_roles("/documents"))) -> dict:
+        docs = _all_docs(claims.tenant_id, _ws_filter(workspace_id))
         return {"documents": docs, "total": len(docs)}
 
     @app.get("/projects", tags=["documents"])
@@ -1108,47 +1261,28 @@ def create_app() -> FastAPI:
     return app
 
 
-def _db_documents(tenant_id: str, ws_filter) -> list[dict]:
-    try:
-        import psycopg  # noqa: PLC0415
-        from psycopg.rows import dict_row  # noqa: PLC0415
-
-        with psycopg.connect(os.environ["DATABASE_URL"], row_factory=dict_row) as conn:
-            rows = conn.execute(
-                """SELECT d.id as document_id, d.title, d.source_type as source_kind, d.status,
-                          COUNT(c.id) as chunk_count
-                   FROM documents d LEFT JOIN document_chunks c ON c.document_id = d.id
-                   WHERE d.tenant_id = %s
-                   GROUP BY d.id, d.title, d.source_type, d.status
-                   ORDER BY d.created_at DESC LIMIT 100""",
-                (tenant_id,),
-            ).fetchall()
-        out = [{"document_id": str(r["document_id"]), "title": r["title"],
-                "source_kind": r["source_kind"], "status": r["status"],
-                "chunk_count": int(r["chunk_count"])} for r in rows]
-        if ws_filter is not None:
-            out = [d for d in out if d["document_id"] in ws_filter]
-        return out
-    except Exception as exc:
-        observability.capture_exception(exc, operation="api.db_documents")
-        return []
-
-
 def _all_docs(tenant_id: str, ws_filter) -> list[dict]:
-    """Unified document list across in-memory and DB paths (for project/archive views)."""
+    """Every document of a tenant: the upload records, plus (in the in-memory
+    demo) chunks that were loaded directly by scripts or tests without one."""
+    try:
+        docs = [d.to_dict() for d in state.documents.list(tenant_id)]
+    except Exception as exc:  # noqa: BLE001 - a listing must degrade, not fail the page
+        observability.capture_exception(exc, operation="api.list_documents")
+        docs = []
     if state.vector_store is not None:
-        seen: dict[str, dict] = {}
+        known = {d["document_id"] for d in docs}
+        seeded: dict[str, dict] = {}
         for chunk in state.vector_store.for_tenant(tenant_id):
-            if ws_filter is not None and chunk.document_id not in ws_filter:
+            if chunk.document_id in known:
                 continue
-            d = seen.setdefault(chunk.document_id, {
-                "document_id": chunk.document_id, "title": chunk.title,
-                "source_kind": chunk.source_type, "chunk_count": 0})
+            d = seeded.setdefault(chunk.document_id, {
+                "document_id": chunk.document_id, "id": chunk.document_id, "title": chunk.title,
+                "source_kind": chunk.source_type, "chunk_count": 0, "status": "ready"})
             d["chunk_count"] += 1
-        return list(seen.values())
-    if os.environ.get("DATABASE_URL"):
-        return _db_documents(tenant_id, ws_filter)
-    return []
+        docs.extend(seeded.values())
+    if ws_filter is not None:
+        docs = [d for d in docs if d["document_id"] in ws_filter]
+    return docs
 
 
 app = create_app()

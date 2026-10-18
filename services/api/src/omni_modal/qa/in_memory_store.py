@@ -69,6 +69,15 @@ class InMemoryVectorStore:
             self.add(chunk)
         return len(chunks)
 
+    def remove_document(self, tenant_id: str, document_id: str) -> int:
+        """Drop every chunk of one document; returns how many were removed."""
+        with self._lock:
+            before = len(self._chunks)
+            self._chunks = [
+                c for c in self._chunks if not (c.tenant_id == tenant_id and c.document_id == document_id)
+            ]
+            return before - len(self._chunks)
+
     def for_tenant(self, tenant_id: str) -> list[StoredChunk]:
         with self._lock:
             return [c for c in self._chunks if c.tenant_id == tenant_id]
@@ -92,10 +101,14 @@ class InMemoryChunkPersistence:
     ) -> None:
         self._store = store
         self._provider = embedding_provider
+        # Set by the durable upload flow: refuse to index a document deleted meanwhile.
+        self.document_exists = None
 
     def persist(self, result: IngestionResult) -> int:
         if result.status != "ready" or not result.chunks:
             return 0
+        if self.document_exists is not None and not self.document_exists(result.tenant_id, result.document_id):
+            raise LookupError(f"Document {result.document_id} was deleted during processing.")
 
         contents = [chunk.content for chunk in result.chunks]
         embed_documents = getattr(self._provider, "embed_documents", None)
@@ -105,6 +118,8 @@ class InMemoryChunkPersistence:
             embeddings = [self._provider.embed_query(text) for text in contents]
 
         source_type = result.source_kind or "note"
+        # Reprocessing replaces the document's chunks rather than adding to them.
+        self._store.remove_document(result.tenant_id, result.document_id)
         stored: list[StoredChunk] = []
         for chunk, embedding in zip(result.chunks, embeddings):
             stored.append(

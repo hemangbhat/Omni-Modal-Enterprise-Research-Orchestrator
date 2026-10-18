@@ -27,6 +27,24 @@ def _vector_literal(embedding: list[float]) -> str:
     return "[" + ",".join(repr(float(v)) for v in embedding) + "]"
 
 
+class DocumentGone(Exception):
+    """The document was deleted while it was being processed."""
+
+
+def ensure_user_row(cur, tenant_id: str, owner_id: str) -> str:
+    """The ``users`` row id for an auth user, created on first use (documents.owner_id needs one)."""
+    email = owner_id if "@" in owner_id else f"{owner_id}@omero.local"
+    cur.execute(
+        """INSERT INTO users (tenant_id, email, display_name, role)
+           VALUES (%s, %s, %s, 'researcher')
+           ON CONFLICT (tenant_id, email)
+           DO UPDATE SET display_name = EXCLUDED.display_name
+           RETURNING id""",
+        (tenant_id, email, owner_id),
+    )
+    return str(cur.fetchone()[0])
+
+
 class PostgresChunkPersistence:
     def __init__(
         self,
@@ -36,7 +54,12 @@ class PostgresChunkPersistence:
         database_url: str | None = None,
         embedding_model: str = "sentence-transformers",
         dimensions: int = 384,
+        require_document: bool = False,
     ) -> None:
+        # True for the durable upload flow, where the document row is created at
+        # upload time: persisting then only updates that row, under a lock, and
+        # refuses if it was deleted meanwhile (instead of re-creating it).
+        self._require_document = require_document
         self._provider = embedding_provider
         self._pool = pool
         self._database_url = database_url
@@ -69,8 +92,22 @@ class PostgresChunkPersistence:
 
                 apply_tenant(conn, result.tenant_id)
                 with conn.cursor() as cur:
-                    owner_uuid = self._ensure_user(cur, result.tenant_id, result.owner_id)
-                    self._upsert_document(cur, result, owner_uuid, source_type)
+                    if self._require_document:
+                        cur.execute(
+                            """SELECT id FROM documents WHERE id = %s AND tenant_id = %s FOR UPDATE""",
+                            (result.document_id, result.tenant_id),
+                        )
+                        if cur.fetchone() is None:
+                            raise DocumentGone(result.document_id)
+                        cur.execute(
+                            """UPDATE documents SET title = %s, status = 'ready', processed_at = now(),
+                                      updated_at = now()
+                               WHERE id = %s AND tenant_id = %s""",
+                            (result.title, result.document_id, result.tenant_id),
+                        )
+                    else:
+                        owner_uuid = self._ensure_user(cur, result.tenant_id, result.owner_id)
+                        self._upsert_document(cur, result, owner_uuid, source_type)
                     # Re-ingest: drop existing chunks (embeddings cascade) then insert fresh.
                     cur.execute(
                         "DELETE FROM document_chunks WHERE document_id = %s",
@@ -100,17 +137,19 @@ class PostgresChunkPersistence:
                         )
         return len(result.chunks)
 
+    def delete_document_chunks(self, tenant_id: str, document_id: str) -> int:
+        """Remove a document's chunks (embeddings cascade): used when processing
+        fails, so a failed document never answers from an older version."""
+        with self._connect() as conn:
+            with conn.transaction(), conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM document_chunks WHERE document_id::text = %s AND tenant_id = %s",
+                    (document_id, tenant_id),
+                )
+                return cur.rowcount
+
     def _ensure_user(self, cur, tenant_id: str, owner_id: str) -> str:
-        email = owner_id if "@" in owner_id else f"{owner_id}@omero.local"
-        cur.execute(
-            """INSERT INTO users (tenant_id, email, display_name, role)
-               VALUES (%s, %s, %s, 'researcher')
-               ON CONFLICT (tenant_id, email)
-               DO UPDATE SET display_name = EXCLUDED.display_name
-               RETURNING id""",
-            (tenant_id, email, owner_id),
-        )
-        return str(cur.fetchone()[0])
+        return ensure_user_row(cur, tenant_id, owner_id)
 
     def _upsert_document(self, cur, result: IngestionResult, owner_uuid: str, source_type: str) -> None:
         cur.execute(

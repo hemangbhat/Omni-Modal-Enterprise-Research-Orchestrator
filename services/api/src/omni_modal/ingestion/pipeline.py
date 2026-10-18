@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 from omni_modal.ingestion.chunking import ChunkingConfig, DeterministicChunker
 from omni_modal.ingestion.extractors import (
@@ -59,7 +59,14 @@ class MultimodalIngestionPipeline:
         self._chunker = chunker or DeterministicChunker(ChunkingConfig())
         self._persistence = persistence
 
-    def ingest(self, request: IngestionRequest) -> IngestionResult:
+    def ingest(
+        self,
+        request: IngestionRequest,
+        on_stage: Callable[[str], None] | None = None,
+    ) -> IngestionResult:
+        """Run the pipeline. ``on_stage`` is told each stage as it starts:
+        "extracting" or "transcribing", then "chunking", then "embedding"."""
+        report = on_stage or (lambda _stage: None)
         source_kind = request.source_kind or infer_source_kind(request.file_path)
         title = request.title or request.file_path.name
         base_metadata = {
@@ -127,6 +134,7 @@ class MultimodalIngestionPipeline:
 
         try:
             # Stage: extraction
+            report("transcribing" if source_kind == "audio" else "extracting")
             observability.add_breadcrumb(
                 message="Ingestion stage started: extraction",
                 category="ingestion",
@@ -174,6 +182,7 @@ class MultimodalIngestionPipeline:
                 )
 
             # Stage: chunking
+            report("chunking")
             observability.add_breadcrumb(
                 message="Ingestion stage started: chunking",
                 category="ingestion",
@@ -224,6 +233,7 @@ class MultimodalIngestionPipeline:
             )
 
             if self._persistence is not None and chunks:
+                report("embedding")
                 observability.add_breadcrumb(
                     message="Ingestion stage started: embedding",
                     category="ingestion",

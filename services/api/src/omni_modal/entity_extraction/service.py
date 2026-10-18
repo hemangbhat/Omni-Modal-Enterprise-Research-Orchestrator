@@ -125,12 +125,17 @@ class EntityExtractionService:
             new_records = output_to_entity_records(output)
             records.extend(new_records)
 
-        if records:
-            key = f"{result.tenant_id}:{result.document_id}"
-            with self._lock:
-                self._records[key].extend(records)
+        # Replace, not append: reprocessing a document must not duplicate its entities.
+        key = f"{result.tenant_id}:{result.document_id}"
+        with self._lock:
+            self._records[key] = list(records)
 
         return records
+
+    def delete_records(self, tenant_id: str, document_id: str) -> None:
+        """Forget a document's entities (used when the document is deleted)."""
+        with self._lock:
+            self._records.pop(f"{tenant_id}:{document_id}", None)
 
     def get_records(self, tenant_id: str, document_id: str) -> list[Any]:
         """Return stored entity records for a specific document."""

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from omni_modal.observability import observability
@@ -21,6 +22,7 @@ from omni_modal.orchestration.a2a import (
 )
 from omni_modal.qa.models import QueryRequest, QueryResponse
 from omni_modal.qa.retrieval import ChunkRetriever
+from omni_modal.qa.synthesis import stream_markdown
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,30 @@ class DeterministicAgentGraph:
         self._total_timeout_ms = total_timeout_ms
 
     def run(self, request: QueryRequest) -> AgentWorkflowResult:
+        result = None
+        for item in self._execute(request, streaming=False):
+            result = item
+        assert isinstance(result, AgentWorkflowResult)
+        return result
+
+    def run_stream(self, request: QueryRequest) -> Iterator[str | AgentWorkflowResult]:
+        """Run the same nodes, yielding answer text as it is produced, then the result.
+
+        A node with a ``stream`` method (the synthesis step) streams its text.
+        When no node streamed (no evidence, or a failure), the final answer's
+        text is streamed once the graph finishes.
+        """
+        streamed = False
+        for item in self._execute(request, streaming=True):
+            if isinstance(item, AgentWorkflowResult):
+                if not streamed:
+                    yield from stream_markdown(item.response.answer_markdown)
+                yield item
+            else:
+                streamed = True
+                yield item
+
+    def _execute(self, request: QueryRequest, *, streaming: bool) -> Iterator[str | AgentWorkflowResult]:
         state = AgentGraphState(request=request)
         completed_steps: list[dict[str, float]] = []
         workflow_start = time.monotonic()
@@ -58,7 +84,18 @@ class DeterministicAgentGraph:
             )
 
             try:
-                state = node.run(state)
+                node_stream = getattr(node, "stream", None) if streaming else None
+                if node_stream is not None:
+                    for item in node_stream(state):
+                        handed_off = time.monotonic()
+                        yield item
+                        # Time the client spends reading is not the workflow's:
+                        # shift both clocks past it.
+                        waited = time.monotonic() - handed_off
+                        step_start += waited
+                        workflow_start += waited
+                else:
+                    state = node.run(state)
                 elapsed_ms = (time.monotonic() - step_start) * 1000
                 completed_steps.append({"name": step_name, "duration_ms": elapsed_ms})
 
@@ -134,7 +171,7 @@ class DeterministicAgentGraph:
 
         if state.response is None:
             raise RuntimeError("Agent graph completed without a response.")
-        return AgentWorkflowResult(
+        yield AgentWorkflowResult(
             response=state.response,
             trace=state.to_trace_json(),
         )
@@ -166,3 +203,6 @@ class InternalResearchAdkWorkflow:
 
     def answer(self, request: QueryRequest) -> AgentWorkflowResult:
         return self._graph.run(request)
+
+    def answer_stream(self, request: QueryRequest) -> Iterator[str | AgentWorkflowResult]:
+        return self._graph.run_stream(request)

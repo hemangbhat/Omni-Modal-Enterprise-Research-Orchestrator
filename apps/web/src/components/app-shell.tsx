@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { AssistantPanel } from "@/components/assistant-panel";
 import { MaterialIcon } from "@/components/material-icon";
 import { useAuth } from "@/components/auth-context";
 
@@ -44,6 +45,8 @@ export function AppShell({ children }: { children: ReactNode }) {
   const router = useRouter();
   const { isReady, isAuthenticated, signOut } = useAuth();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const closeAssistant = useCallback(() => setAssistantOpen(false), []);
 
   const isPublicRoute = PUBLIC_ROUTES.has(pathname);
 
@@ -53,6 +56,19 @@ export function AppShell({ children }: { children: ReactNode }) {
       router.replace("/sign-in");
     }
   }, [isReady, isAuthenticated, isPublicRoute, router]);
+
+  // Ctrl+J / Cmd+J toggles the assistant on any signed-in page.
+  useEffect(() => {
+    if (isPublicRoute || !isAuthenticated) return;
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "j") {
+        e.preventDefault();
+        setAssistantOpen((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [isPublicRoute, isAuthenticated]);
 
   function handleSignOut() {
     signOut();
@@ -103,6 +119,20 @@ export function AppShell({ children }: { children: ReactNode }) {
             <MaterialIcon name="add" size={18} />
             New Analysis
           </Link>
+          <button
+            type="button"
+            onClick={() => setAssistantOpen((open) => !open)}
+            aria-expanded={assistantOpen}
+            className="mt-sm flex w-full items-center justify-between gap-sm rounded-lg px-md py-sm font-label-md text-label-md text-on-surface-variant transition-colors duration-200 hover:bg-surface-container-high hover:text-on-surface"
+          >
+            <span className="flex items-center gap-md">
+              <MaterialIcon name="forum" size={18} />
+              Assistant
+            </span>
+            <kbd className="rounded border border-outline-variant/40 px-[5px] font-mono-sm text-[10px] text-on-surface-variant/70">
+              Ctrl J
+            </kbd>
+          </button>
         </div>
 
         <ul className="flex flex-1 flex-col gap-xs px-sm">
@@ -183,14 +213,24 @@ export function AppShell({ children }: { children: ReactNode }) {
           <h1 className="font-headline-md text-headline-md font-bold tracking-tight text-on-surface">
             OMERO
           </h1>
-          <button
-            type="button"
-            onClick={() => setMobileOpen((open) => !open)}
-            className="rounded-full p-sm text-on-surface-variant transition-colors hover:bg-surface-container-highest/50 active:scale-95"
-            aria-label="Toggle navigation"
-          >
-            <MaterialIcon name={mobileOpen ? "close" : "menu"} />
-          </button>
+          <div className="flex items-center gap-xs">
+            <button
+              type="button"
+              onClick={() => setAssistantOpen((open) => !open)}
+              className="rounded-full p-sm text-on-surface-variant transition-colors hover:bg-surface-container-highest/50 active:scale-95"
+              aria-label="Open assistant"
+            >
+              <MaterialIcon name="forum" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setMobileOpen((open) => !open)}
+              className="rounded-full p-sm text-on-surface-variant transition-colors hover:bg-surface-container-highest/50 active:scale-95"
+              aria-label="Toggle navigation"
+            >
+              <MaterialIcon name={mobileOpen ? "close" : "menu"} />
+            </button>
+          </div>
         </header>
 
         {/* Mobile nav drawer */}
@@ -222,6 +262,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 
         {children}
       </div>
+      <AssistantPanel open={assistantOpen} onClose={closeAssistant} />
     </div>
   );
 }

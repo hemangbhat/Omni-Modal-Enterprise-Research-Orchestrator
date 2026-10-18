@@ -29,14 +29,18 @@ from omni_modal.ingestion.http_contract import (
 )
 from omni_modal.observability import observability
 from omni_modal.orchestration import InternalResearchAdkWorkflow, Phase1Orchestrator
+from omni_modal.orchestration.adk_workflow import AgentWorkflowResult
 from omni_modal.orchestration.a2a import external_client_from_environment
 from omni_modal.qa import (
     PgVectorChunkRetriever,
     QueryRequest,
     select_answer_synthesizer,
     select_embedding_provider,
-    stream_markdown,
 )
+from omni_modal.qa.llm import select_chat_client
+from omni_modal.research.assistant import Assistant, AssistantContext
+from omni_modal.research.followups import QueryRewriter
+from omni_modal.research.sessions import SessionNotFound, select_research_session_service
 from omni_modal.qa.in_memory_store import (
     InMemoryChunkPersistence,
     InMemoryChunkRetriever,
@@ -125,6 +129,24 @@ class QueryRequestModel(BaseModel):
     question: str = Field(..., min_length=1, max_length=4000)
     top_k: int = Field(5, ge=1, le=50)
     min_similarity: float = Field(0.0, ge=0.0, le=1.0)
+    # Continue a saved session; a new one is created when absent (stream only).
+    session_id: str | None = Field(None, max_length=64)
+
+
+class CreateSessionRequest(BaseModel):
+    title: str | None = Field(None, max_length=500)
+    kind: str = Field("research", pattern="^(research|assistant)$")
+
+
+class RenameSessionRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=500)
+
+
+class AssistantRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=4000)
+    session_id: str | None = Field(None, max_length=64)
+    # The path of the page the user is on, e.g. "/documents".
+    page: str | None = Field(None, max_length=200)
 
 
 class CreateWorkspaceRequest(BaseModel):
@@ -179,6 +201,10 @@ class _State:
     sessions: Any = None
     mfa: Any = None
     password_resets: Any = None
+    retriever: Any = None
+    research_sessions: Any = None
+    rewriter: Any = None
+    assistant: Any = None
 
 
 state = _State()
@@ -226,10 +252,20 @@ def _build_runtime() -> None:
         entity_service=state.entity_service,
     )
     state.queue.start_worker()
+    state.retriever = retriever
     state.workflow = InternalResearchAdkWorkflow(
         retriever, external_client_from_environment(), select_answer_synthesizer()
     )
     state.saas = get_saas_service()
+    chat_client = select_chat_client()
+    state.research_sessions = select_research_session_service()
+    state.rewriter = QueryRewriter(chat_client)
+    state.assistant = Assistant(
+        retriever=retriever,
+        documents_fn=lambda tenant_id: _all_docs(tenant_id, None),
+        saas=_SaasReader(state.saas),
+        chat_client=chat_client,
+    )
     state.accounts = get_account_service()
     from omni_modal.security.sessions import select_session_service  # noqa: PLC0415
 
@@ -243,6 +279,30 @@ def _build_runtime() -> None:
     from omni_modal.security.pg_audit_sink import select_audit_sink  # noqa: PLC0415
 
     state.audit_sink = select_audit_sink()
+
+
+class _SaasReader:
+    """The read-only slice of the SaaS service the assistant may use."""
+
+    def __init__(self, saas) -> None:
+        self._saas = saas
+
+    def usage_report(self, tenant_id: str) -> dict:
+        return self._saas.usage_report(tenant_id)
+
+    def list_members(self, tenant_id: str, user_id: str) -> list[dict]:
+        org = self._saas.ensure_org(tenant_id, owner_user_id=user_id)
+        return [m.to_dict() for m in self._saas.workspaces.list_members(org.id)]
+
+
+def _sse(event: str, payload: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
+
+
+# Proxies must pass stream chunks through as they arrive.
+_SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+# Earlier question/answer pairs passed to follow-ups.
+HISTORY_TURNS = 4
 
 
 @asynccontextmanager
@@ -577,27 +637,174 @@ def create_app() -> FastAPI:
             raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Query failed.") from exc
         return {**result.response.to_json_dict(), "trace": result.trace}
 
-    @app.post("/query/stream", tags=["research"])
-    async def query_stream(body: QueryRequestModel, claims: JwtClaims = Depends(require_roles("/query/stream"))):
-        meter(claims, "queries")
-        req = QueryRequest(
-            tenant_id=claims.tenant_id, user_id=claims.user_id, question=body.question,
-            top_k=body.top_k, min_similarity=body.min_similarity,
-        )
+    # These handlers are plain ``def``: FastAPI runs them in a worker thread,
+    # so the blocking session-store, metering and model calls never stall the
+    # event loop. A sync generator passed to StreamingResponse is iterated in a
+    # worker thread too.
+    def _load_history(claims: JwtClaims, session_id: str | None, kind: str) -> list[tuple[str, str]]:
+        """Earlier turns of a caller-owned session of ``kind``; 404 for anyone else's."""
+        if not session_id:
+            return []
         try:
-            result = state.workflow.answer(req)
-        except Exception as exc:
-            observability.capture_exception(exc, operation="api.query_stream")
-            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Query failed.") from exc
+            detail = state.research_sessions.get(claims.tenant_id, claims.user_id, session_id)
+        except SessionNotFound as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found.") from exc
+        if detail.session.kind != kind:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found.")
+        return [(m.role, m.content) for m in detail.messages[-2 * HISTORY_TURNS:]]
 
-        final_payload = {**result.response.to_json_dict(), "trace": result.trace}
+    def _session_for(claims: JwtClaims, session_id: str | None, kind: str, first_text: str) -> str:
+        if session_id:
+            return session_id
+        return state.research_sessions.create(claims.tenant_id, claims.user_id, title=first_text, kind=kind).id
+
+    class _Turn:
+        """What one streamed answer has produced so far, saved exactly once."""
+
+        def __init__(self, claims: JwtClaims, session_id: str, question: str) -> None:
+            self.claims, self.session_id, self.question = claims, session_id, question
+            self.parts: list[str] = []
+            self.saved = False
+
+        def save(self, answer: str, answer_status: str, citations: list[dict]) -> None:
+            if self.saved:
+                return
+            self.saved = True
+            try:
+                state.research_sessions.append_turn(
+                    self.claims.tenant_id, self.claims.user_id, self.session_id,
+                    question=self.question, answer=answer, status=answer_status, citations=citations,
+                )
+            except SessionNotFound:
+                pass  # deleted while the answer was streaming
+            except Exception as exc:  # noqa: BLE001 - the answer was delivered; saving is best-effort
+                observability.capture_exception(exc, operation="api.save_turn")
+
+        def save_unfinished(self) -> None:
+            """The client left, or the stream broke, before the answer finished."""
+            partial = "".join(self.parts).strip()
+            if partial:
+                self.save(partial + "\n\n_This answer was interrupted before it finished._", "interrupted", [])
+            else:
+                self.save("No answer was produced: the request ended before it finished.", "failed", [])
+
+    @app.post("/query/stream", tags=["research"])
+    def query_stream(body: QueryRequestModel, claims: JwtClaims = Depends(require_roles("/query/stream"))):
+        history = _load_history(claims, body.session_id, "research")
+        meter(claims, "queries")
+        session_id = _session_for(claims, body.session_id, "research", body.question)
+        turn = _Turn(claims, session_id, body.question)
 
         def _events():
-            for chunk in stream_markdown(result.response.answer_markdown):
-                yield f"event: delta\ndata: {json.dumps({'delta': chunk})}\n\n"
-            yield f"event: done\ndata: {json.dumps(final_payload)}\n\n"
+            try:
+                yield _sse("session", {"session_id": session_id})
+                search_query = state.rewriter.rewrite(body.question, history) if history else None
+                req = QueryRequest(
+                    tenant_id=claims.tenant_id, user_id=claims.user_id, question=body.question,
+                    top_k=body.top_k, min_similarity=body.min_similarity,
+                    history=tuple(history), search_query=search_query,
+                )
+                result = None
+                try:
+                    for item in state.workflow.answer_stream(req):
+                        if isinstance(item, AgentWorkflowResult):
+                            result = item
+                        else:
+                            turn.parts.append(item)
+                            yield _sse("delta", {"delta": item})
+                except Exception as exc:  # noqa: BLE001
+                    observability.capture_exception(exc, operation="api.query_stream")
+                    turn.save_unfinished()
+                    yield _sse("error", {"error": "Query failed.", "session_id": session_id})
+                    return
+                response = result.response.to_json_dict()
+                turn.save(response["answer_markdown"], response["status"], response["citations"])
+                yield _sse("done", {**response, "trace": result.trace,
+                                    "session_id": session_id, "search_query": search_query})
+            finally:
+                # Runs on normal completion (no-op), errors, and client disconnects.
+                turn.save_unfinished()
 
-        return StreamingResponse(_events(), media_type="text/event-stream")
+        return StreamingResponse(_events(), media_type="text/event-stream", headers=_SSE_HEADERS)
+
+    # ── Saved sessions ───────────────────────────────────────────────────
+    @app.get("/research/sessions", tags=["research"])
+    def list_sessions(kind: str | None = None,
+                      claims: JwtClaims = Depends(require_roles("/research/sessions"))) -> dict:
+        if kind not in (None, "research", "assistant"):
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "kind must be research or assistant.")
+        items = state.research_sessions.list(claims.tenant_id, claims.user_id, kind=kind)
+        return {"sessions": [s.to_dict() for s in items], "total": len(items)}
+
+    @app.post("/research/sessions", status_code=201, tags=["research"])
+    def create_session(body: CreateSessionRequest,
+                       claims: JwtClaims = Depends(require_roles("/research/sessions"))) -> dict:
+        return state.research_sessions.create(
+            claims.tenant_id, claims.user_id, title=body.title, kind=body.kind
+        ).to_dict()
+
+    @app.get("/research/sessions/{session_id}", tags=["research"])
+    def get_session(session_id: str,
+                    claims: JwtClaims = Depends(require_roles("/research/sessions/"))) -> dict:
+        try:
+            return state.research_sessions.get(claims.tenant_id, claims.user_id, session_id).to_dict()
+        except SessionNotFound as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found.") from exc
+
+    @app.patch("/research/sessions/{session_id}", tags=["research"])
+    def rename_session(session_id: str, body: RenameSessionRequest,
+                       claims: JwtClaims = Depends(require_roles("/research/sessions/"))) -> dict:
+        try:
+            return state.research_sessions.rename(
+                claims.tenant_id, claims.user_id, session_id, body.title
+            ).to_dict()
+        except SessionNotFound as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found.") from exc
+
+    @app.delete("/research/sessions/{session_id}", tags=["research"])
+    def delete_session(session_id: str,
+                       claims: JwtClaims = Depends(require_roles("/research/sessions/"))) -> dict:
+        try:
+            state.research_sessions.delete(claims.tenant_id, claims.user_id, session_id)
+        except SessionNotFound as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found.") from exc
+        return {"deleted": True}
+
+    # ── Site-wide assistant (read-only) ──────────────────────────────────
+    @app.post("/assistant/stream", tags=["assistant"])
+    def assistant_stream(body: AssistantRequest, claims: JwtClaims = Depends(current_claims)):
+        history = _load_history(claims, body.session_id, "assistant")
+        meter(claims, "queries")
+        session_id = _session_for(claims, body.session_id, "assistant", body.message)
+        turn = _Turn(claims, session_id, body.message)
+        ctx = AssistantContext(
+            tenant_id=claims.tenant_id, user_id=claims.user_id,
+            roles=tuple(claims.roles), page_path=body.page or "",
+        )
+
+        def _events():
+            try:
+                yield _sse("session", {"session_id": session_id})
+                done = None
+                try:
+                    for name, payload in state.assistant.respond_stream(ctx, body.message, history):
+                        if name == "done":
+                            done = payload
+                        else:
+                            if name == "delta":
+                                turn.parts.append(payload["delta"])
+                            yield _sse(name, payload)
+                except Exception as exc:  # noqa: BLE001
+                    observability.capture_exception(exc, operation="api.assistant_stream")
+                    turn.save_unfinished()
+                    yield _sse("error", {"error": "The assistant failed.", "session_id": session_id})
+                    return
+                turn.save(done["answer_markdown"], "answered", done["citations"])
+                yield _sse("done", {**done, "session_id": session_id})
+            finally:
+                turn.save_unfinished()
+
+        return StreamingResponse(_events(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
     # ── SaaS reads ───────────────────────────────────────────────────────
     @app.get("/workspaces", tags=["saas"])

@@ -8,6 +8,8 @@ ENDPOINT_ROLES: dict[str, frozenset[str]] = {
     "/documents":      frozenset({"researcher", "admin", "auditor"}),
     "/projects":       frozenset({"researcher", "admin", "auditor"}),
     "/archives":       frozenset({"researcher", "admin", "auditor"}),
+    # Saved sessions are private to their owner; any role may keep its own.
+    "/research/sessions": frozenset({"researcher", "admin", "auditor"}),
     # SaaS endpoints
     "/workspaces":           frozenset({"researcher", "admin"}),
     "/invites":              frozenset({"admin"}),
@@ -22,6 +24,7 @@ ENDPOINT_ROLES: dict[str, frozenset[str]] = {
 ENDPOINT_ROLE_PREFIXES: dict[str, frozenset[str]] = {
     "/entities/":  frozenset({"researcher", "admin", "auditor"}),
     "/archives/":  frozenset({"researcher", "admin", "auditor"}),
+    "/research/sessions/": frozenset({"researcher", "admin", "auditor"}),
 }
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from dataclasses import replace
 from typing import Protocol
 
 from omni_modal.orchestration.a2a import (
@@ -50,7 +52,11 @@ class InternalRetrievalNode:
             return state
 
         try:
-            state.retrieved_chunks = self._retriever.retrieve(state.request)
+            # A follow-up is retrieved with its standalone rewrite.
+            request = state.request
+            if request.search_query:
+                request = replace(request, question=request.search_query)
+            state.retrieved_chunks = self._retriever.retrieve(request)
             state.add_trace(
                 "retrieve_internal_evidence",
                 "ok",
@@ -94,24 +100,47 @@ class ReasoningSynthesisNode:
     def __init__(self, synthesizer: ExtractiveAnswerSynthesizer | None = None) -> None:
         self._synthesizer = synthesizer or ExtractiveAnswerSynthesizer()
 
-    def run(self, state: AgentGraphState) -> AgentGraphState:
+    def _skip(self, state: AgentGraphState) -> bool:
         if state.error_message or state.missing_data:
             state.add_trace(
                 "synthesize_answer",
                 "skipped",
                 "Skipped because internal evidence is unavailable or insufficient.",
             )
-            return state
+            return True
+        return False
 
-        state.response = self._synthesizer.synthesize(
-            state.request, state.retrieved_chunks
-        )
+    def _done(self, state: AgentGraphState) -> AgentGraphState:
         state.add_trace(
             "synthesize_answer",
             "ok",
             "Built Markdown answer from retrieved internal evidence only.",
         )
         return state
+
+    def run(self, state: AgentGraphState) -> AgentGraphState:
+        if self._skip(state):
+            return state
+        state.response = self._synthesizer.synthesize(
+            state.request, state.retrieved_chunks
+        )
+        return self._done(state)
+
+    def stream(self, state: AgentGraphState) -> Iterator[str]:
+        """Like ``run``, but yields answer text as the synthesizer produces it."""
+        if self._skip(state):
+            return
+        stream = getattr(self._synthesizer, "synthesize_stream", None)
+        if stream is None:
+            state.response = self._synthesizer.synthesize(state.request, state.retrieved_chunks)
+            yield state.response.answer_markdown
+        else:
+            for item in stream(state.request, state.retrieved_chunks):
+                if isinstance(item, QueryResponse):
+                    state.response = item
+                else:
+                    yield item
+        self._done(state)
 
 
 class ExternalDelegationNode:
@@ -229,11 +258,12 @@ class ControlledFallbackNode:
             status = "failed"
             detail = "Returned controlled failure response."
         else:
-            delegation_detail = (
-                "External delegation did not return usable findings."
-                if state.external_delegation_attempted
-                else "No external delegation was attempted."
-            )
+            if state.external_response is not None and state.external_response.status == "disabled":
+                delegation_detail = "External research is not turned on, so nothing was searched outside your documents."
+            elif state.external_delegation_attempted:
+                delegation_detail = "External delegation did not return usable findings."
+            else:
+                delegation_detail = "No external delegation was attempted."
             answer = (
                 "## Answer\n\n"
                 "I could not find enough internal evidence to answer this question. "

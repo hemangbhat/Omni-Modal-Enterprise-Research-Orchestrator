@@ -283,6 +283,47 @@ export const passwordResetTokens = pgTable(
   })
 );
 
+export const researchSessions = pgTable(
+  "research_sessions",
+  {
+    id: text("id").primaryKey(),
+    tenantId: text("tenant_id").notNull(),
+    userId: text("user_id").notNull(),
+    kind: text("kind").notNull().default("research"),
+    title: text("title").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => ({
+    ownerIdx: index("research_sessions_owner_idx").on(
+      table.tenantId,
+      table.userId,
+      table.kind,
+      table.updatedAt
+    )
+  })
+);
+
+export const researchMessages = pgTable(
+  "research_messages",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => researchSessions.id, { onDelete: "cascade" }),
+    tenantId: text("tenant_id").notNull(),
+    seq: integer("seq").notNull(),
+    role: text("role").notNull(),
+    content: text("content").notNull(),
+    status: text("status"),
+    citations: jsonb("citations").notNull().default([]),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => ({
+    sessionSeq: uniqueIndex("research_messages_session_id_seq_key").on(table.sessionId, table.seq)
+  })
+);
+
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 export type Document = typeof documents.$inferSelect;

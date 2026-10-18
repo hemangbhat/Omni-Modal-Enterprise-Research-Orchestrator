@@ -1,179 +1,159 @@
 "use client";
 
-import { useRef, useState } from "react";
+import Link from "next/link";
+import { useEffect, useRef, useState } from "react";
 import { MaterialIcon } from "@/components/material-icon";
-import { apiRequest, captureUploadError } from "@/lib/api-client";
-import { getClientApiConfig } from "@/lib/env";
+import { captureUploadError } from "@/lib/api-client";
+import {
+  DocumentsApiError,
+  completeUpload,
+  createUploadSlot,
+  formatBytes,
+  getDocument,
+  isFinal,
+  sendFile,
+  sha256Hex,
+  stageLabel,
+  type JobStage
+} from "@/lib/documents-api";
+import { ALLOWED_EXTENSIONS, validateUploadFile } from "@/hooks/useUploadValidation";
 import { getActiveWorkspaceId } from "@/lib/workspace";
 
-// Ingestion job states reported by the backend (`GET /ingest/jobs/{id}`).
-type DocumentStatus = "uploaded" | "processing" | "ready" | "failed";
+type Phase = "checking" | "uploading" | JobStage | "duplicate" | "rejected";
 
 type UploadItem = {
-  id: string;
+  key: string;
   name: string;
-  size: string;
-  type: string;
-  status: DocumentStatus;
+  size: number;
+  phase: Phase;
+  progress: number; // 0..1 while the bytes are being sent
+  documentId?: string;
   error?: string;
 };
 
-const acceptedTypes = ["application/pdf", "audio/mpeg", "audio/wav", "audio/x-wav"];
+// The steps a file goes through, in order, as the user sees them.
+const STEPS: { label: string; phases: Phase[] }[] = [
+  { label: "Upload", phases: ["checking", "uploading", "awaiting_upload"] },
+  { label: "Read", phases: ["queued", "extracting", "transcribing"] },
+  { label: "Split", phases: ["chunking"] },
+  { label: "Index", phases: ["embedding"] },
+  { label: "Ready", phases: ["done", "duplicate"] }
+];
 
-const PIPELINE_STAGES = [
-  { key: "uploaded", label: "Uploaded", note: "Secured in staging environment" },
-  { key: "processing", label: "OCR / Transcription", note: "Extracting entity text & audio" },
-  { key: "vectorizing", label: "Vectorization", note: "Generating semantic embeddings" },
-  { key: "ready", label: "Ready", note: "Available for deep research" }
-] as const;
-
-function formatBytes(bytes: number) {
-  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+function stepIndex(phase: Phase): number {
+  const index = STEPS.findIndex((step) => step.phases.includes(phase));
+  return index === -1 ? 0 : index;
 }
 
-function sourceKindFor(type: string): "pdf" | "audio" | undefined {
-  if (type === "application/pdf") return "pdf";
-  if (type.startsWith("audio/")) return "audio";
-  return undefined;
+function phaseText(item: UploadItem): string {
+  if (item.phase === "checking") return "Checking file";
+  if (item.phase === "uploading") return `Uploading ${Math.round(item.progress * 100)}%`;
+  if (item.phase === "duplicate") return "Already in your library";
+  if (item.phase === "rejected") return "Not uploaded";
+  return stageLabel(item.phase);
 }
 
-async function fileToBase64(file: File): Promise<string> {
-  const buffer = await file.arrayBuffer();
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
-  return btoa(binary);
-}
-
-/** Map a job status to the active pipeline stage index. */
-function activeStageIndex(status: DocumentStatus | undefined): number {
-  switch (status) {
-    case "uploaded":
-      return 0;
-    case "processing":
-      return 1;
-    case "ready":
-      return 3;
-    default:
-      return 0;
-  }
-}
+const POLL_MS = 1500;
+const POLL_LIMIT_MS = 10 * 60 * 1000;
 
 export function UploadDropzone() {
   const [items, setItems] = useState<UploadItem[]>([]);
   const [dragging, setDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const latest = items[0];
+  // Polling stops when the user leaves the page.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
-  function patchItem(id: string, patch: Partial<UploadItem>) {
-    setItems((current) =>
-      current.map((item) => (item.id === id ? { ...item, ...patch } : item))
-    );
+  function patch(key: string, change: Partial<UploadItem>) {
+    setItems((current) => current.map((item) => (item.key === key ? { ...item, ...change } : item)));
   }
 
-  async function pollJob(itemId: string, jobId: string, baseUrl: string, token: string | null) {
-    const headers: Record<string, string> = {};
-    if (token) headers.Authorization = `Bearer ${token}`;
-    for (let attempt = 0; attempt < 30; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+  async function follow(key: string, documentId: string) {
+    const started = Date.now();
+    while (Date.now() - started < POLL_LIMIT_MS) {
+      await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+      if (!mounted.current) return;
       try {
-        const res = await apiRequest(
-          `/ingest/jobs/${jobId}`,
-          { method: "GET", headers },
-          { baseUrl }
-        );
-        if (!res.ok) continue;
-        const body = (await res.json()) as {
-          status: DocumentStatus;
-          error_message?: string | null;
-        };
-        patchItem(itemId, { status: body.status, error: body.error_message ?? undefined });
-        if (body.status === "ready" || body.status === "failed") return;
-      } catch {
-        // transient — keep polling
+        const { document, job } = await getDocument(documentId);
+        const stage = job?.stage ?? "queued";
+        patch(key, { phase: stage, error: stage === "failed" ? document.error_message ?? "Processing failed." : undefined });
+        if (isFinal(stage)) return;
+      } catch (err) {
+        if (err instanceof DocumentsApiError && err.status === 404) {
+          patch(key, { phase: "failed", error: "This document was deleted." });
+          return;
+        }
+        // Temporary network trouble: keep polling.
       }
     }
+    patch(key, { error: "Still processing. Check the Documents page later." });
   }
 
-  async function uploadFile(item: UploadItem, file: File) {
-    const { baseUrl, token } = getClientApiConfig();
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (token) headers.Authorization = `Bearer ${token}`;
+  async function upload(key: string, file: File) {
     try {
-      const contentBase64 = await fileToBase64(file);
-      const workspaceId = getActiveWorkspaceId();
-      const res = await apiRequest(
-        "/ingest/upload",
-        {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            filename: file.name,
-            content_base64: contentBase64,
-            source_kind: sourceKindFor(file.type),
-            ...(workspaceId ? { workspace_id: workspaceId } : {})
-          })
-        },
-        { baseUrl, timeout: 60_000 }
-      );
-      if (res.status !== 202) {
-        captureUploadError({
-          file_name: file.name,
-          file_size_bytes: file.size,
-          http_status: res.status
-        });
-        let message = `Upload failed (HTTP ${res.status}).`;
-        try {
-          const body = (await res.json()) as { error?: string };
-          if (body.error) message = body.error;
-        } catch {
-          /* ignore */
+      const sha256 = await sha256Hex(file);
+      const slot = await createUploadSlot(file, sha256, getActiveWorkspaceId());
+      if (slot.duplicate || !slot.upload) {
+        // The same bytes are already known: report what state that copy is in.
+        const existing = slot.document;
+        if (existing.status === "ready") {
+          patch(key, { phase: "duplicate", documentId: existing.id, progress: 1 });
+        } else if (existing.status === "failed") {
+          patch(key, {
+            phase: "failed",
+            documentId: existing.id,
+            error: `This file is already in your library but could not be processed${
+              existing.error_message ? `: ${existing.error_message}` : "."
+            } Use Reprocess on the Documents page.`
+          });
+        } else {
+          patch(key, { phase: slot.job?.stage ?? "queued", documentId: existing.id, progress: 1 });
+          await follow(key, existing.id);
         }
-        patchItem(item.id, { status: "failed", error: message });
         return;
       }
-      const body = (await res.json()) as { job_id: string };
-      patchItem(item.id, { status: "processing" });
-      await pollJob(item.id, body.job_id, baseUrl, token);
+      patch(key, { phase: "uploading", documentId: slot.document.id });
+      await sendFile(slot.upload, file, (progress) => patch(key, { progress }));
+      const done = await completeUpload(slot.document.id);
+      patch(key, { phase: done.job?.stage ?? "queued" });
+      await follow(key, slot.document.id);
     } catch (err) {
-      captureUploadError({
-        file_name: file.name,
-        file_size_bytes: file.size,
-        http_status: "network_error"
-      });
-      patchItem(item.id, {
-        status: "failed",
-        error: err instanceof Error ? err.message : "Network error."
+      const status = err instanceof DocumentsApiError && err.status ? err.status : "network_error";
+      captureUploadError({ file_name: file.name, file_size_bytes: file.size, http_status: status });
+      patch(key, {
+        phase: "failed",
+        error: err instanceof Error ? err.message : "The upload failed. Check your connection and try again."
       });
     }
   }
 
   function handleFiles(files: FileList | null) {
     if (!files) return;
+    const added: UploadItem[] = [];
     Array.from(files).forEach((file, index) => {
-      const id = `${file.name}-${file.lastModified}-${index}`;
-      const accepted = acceptedTypes.includes(file.type);
-      const item: UploadItem = {
-        id,
+      const key = `${file.name}-${file.size}-${file.lastModified}-${Date.now()}-${index}`;
+      const problem = validateUploadFile(file);
+      added.push({
+        key,
         name: file.name,
-        size: formatBytes(file.size),
-        type: file.type || "unknown",
-        status: accepted ? "uploaded" : "failed",
-        error: accepted ? undefined : "Unsupported file type."
-      };
-      setItems((current) => [item, ...current]);
-      if (accepted) void uploadFile(item, file);
+        size: file.size,
+        phase: problem ? "rejected" : "checking",
+        progress: 0,
+        error: problem ?? undefined
+      });
+      if (!problem) void upload(key, file);
     });
+    setItems((current) => [...added, ...current]);
   }
-
-  const activeIndex = activeStageIndex(latest?.status);
-  const failed = latest?.status === "failed";
 
   return (
     <div className="grid grid-cols-1 gap-gutter lg:grid-cols-12">
-      {/* Left: dropzone */}
-      <div className="space-y-lg lg:col-span-7">
+      <div className="space-y-md lg:col-span-6">
         <button
           type="button"
           onClick={() => inputRef.current?.click()}
@@ -187,174 +167,116 @@ export function UploadDropzone() {
             setDragging(false);
             handleFiles(event.dataTransfer.files);
           }}
-          className={`flex min-h-[320px] w-full flex-col items-center justify-center rounded-xl border-2 border-dashed bg-surface-container-low/50 p-12 text-center backdrop-blur-sm transition-all duration-300 ${
+          className={`flex min-h-[300px] w-full flex-col items-center justify-center rounded-2xl border-2 border-dashed p-xl text-center transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary-fixed-dim ${
             dragging
-              ? "border-primary-container bg-surface-container"
-              : "border-primary-container/40 hover:border-primary-container hover:bg-surface-container"
+              ? "border-primary-fixed-dim bg-primary-fixed-dim/[0.06]"
+              : "border-outline-variant/60 bg-surface-container-low/60 hover:border-primary-fixed-dim/60"
           }`}
         >
           <input
             ref={inputRef}
             type="file"
             multiple
-            accept=".pdf,audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav"
+            accept={Array.from(ALLOWED_EXTENSIONS).join(",")}
             className="sr-only"
-            onChange={(event) => handleFiles(event.target.files)}
+            onChange={(event) => {
+              handleFiles(event.target.files);
+              event.target.value = "";
+            }}
           />
-          <span className="mb-6 flex h-20 w-20 items-center justify-center rounded-full bg-primary/10">
-            <MaterialIcon name="cloud_upload" size={40} className="text-primary-container" />
+          <MaterialIcon name="upload_file" size={40} className="mb-md text-primary-fixed-dim" />
+          <span className="mb-xs text-[19px] font-semibold text-on-surface">Drop PDFs or recordings here</span>
+          <span className="mb-lg max-w-sm text-[15px] leading-relaxed text-on-surface-variant">
+            or click to choose files. Up to 50 MB each.
           </span>
-          <h3 className="mb-2 font-headline-md text-headline-md text-on-surface">
-            Drop audio, PDF, or docs here
-          </h3>
-          <p className="mb-8 max-w-sm font-body-md text-body-md text-on-surface-variant">
-            Files are processed locally before secure transport to the indexing engine.
-          </p>
-          <span className="rounded-lg border border-outline-variant px-6 py-2 font-label-md text-label-md text-primary-container transition-colors hover:bg-primary-container/10">
-            Browse Files
+          <span className="rounded-lg border border-outline-variant px-lg py-sm text-[14px] font-medium text-primary">
+            Choose files
           </span>
         </button>
-
-        <div className="flex flex-wrap items-center gap-3">
-          <span className="mr-2 font-mono-sm text-[11px] uppercase tracking-widest text-on-surface-variant">
-            Supported:
-          </span>
-          {["PDF", "WAV", "MP3", "DOCX"].map((chip) => (
-            <span
-              key={chip}
-              className="rounded-full border border-outline-variant bg-surface-container-lowest px-3 py-1 font-label-md text-label-md text-on-surface"
-            >
-              {chip}
-            </span>
-          ))}
-        </div>
+        <p className="text-[13px] leading-relaxed text-on-surface-variant/80">
+          Accepted: PDF, MP3, WAV, M4A, FLAC, OGG and WEBM. A file that is already in your library is recognised and
+          not processed twice.
+        </p>
       </div>
 
-      {/* Right: active processing + pipeline */}
-      <div className="space-y-lg lg:col-span-5">
-        <div className="rounded-xl border border-outline-variant bg-surface-container p-6 shadow-lg shadow-black/20">
-          <h4 className="mb-4 flex items-center gap-2 font-label-md text-label-md uppercase tracking-widest text-on-surface-variant">
-            <MaterialIcon name="sync" size={16} />
-            Active Processing
-          </h4>
-          {items.length === 0 ? (
-            <p className="font-body-md text-body-md text-on-surface-variant/70">
-              No active uploads. Add a PDF or audio file to begin ingestion.
-            </p>
-          ) : (
-            <div className="space-y-5">
-              {items.map((item) => {
-                const pct =
-                  item.status === "ready"
-                    ? 100
-                    : item.status === "processing"
-                      ? 65
-                      : item.status === "failed"
-                        ? 100
-                        : 20;
-                return (
-                  <div key={item.id}>
-                    <div className="mb-2 flex items-start justify-between">
-                      <div className="flex items-center gap-3">
-                        <MaterialIcon name="description" className="text-outline" />
-                        <div>
-                          <p className="w-48 truncate font-body-md text-body-md text-on-surface">
-                            {item.name}
-                          </p>
-                          <p className="font-mono-sm text-[11px] text-on-surface-variant">
-                            {item.size} • {item.type}
-                          </p>
-                        </div>
-                      </div>
-                      <span
-                        className={`font-label-md text-label-md font-bold ${
-                          item.status === "failed"
-                            ? "text-error"
-                            : "text-primary-container text-glow"
-                        }`}
-                      >
-                        {item.status === "failed" ? "Failed" : `${pct}%`}
-                      </span>
-                    </div>
-                    <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-surface-container-highest">
-                      <div
-                        className={`absolute left-0 top-0 h-full rounded-full transition-all duration-1000 ease-out ${
-                          item.status === "failed"
-                            ? "bg-error"
-                            : "bg-gradient-to-r from-primary to-primary-container shadow-[0_0_10px_rgba(0,209,255,0.8)]"
-                        }`}
-                        style={{ width: `${pct}%` }}
-                      />
-                    </div>
-                    {item.error ? (
-                      <p className="mt-1 font-mono-sm text-[11px] text-error">{item.error}</p>
-                    ) : null}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
-        <div className="rounded-xl border border-outline-variant bg-surface-container p-6 shadow-lg shadow-black/20">
-          <h4 className="mb-6 font-label-md text-label-md uppercase tracking-widest text-on-surface-variant">
-            Status Pipeline
-          </h4>
-          <div className="relative space-y-6 pl-2">
-            {PIPELINE_STAGES.map((stage, index) => {
-              const done = !failed && index < activeIndex;
-              const active = !failed && index === activeIndex;
-              const isError = failed && index === activeIndex;
-              return (
-                <div
-                  key={stage.key}
-                  className={`step-item relative flex items-start gap-4 ${
-                    !done && !active && !isError ? "opacity-50" : ""
-                  }`}
-                >
-                  <div className="stepper-line">
-                    <div
-                      className={`relative z-10 flex h-6 w-6 items-center justify-center rounded-full border-2 ${
-                        isError
-                          ? "border-error bg-error/20"
-                          : done
-                            ? "border-primary-container bg-surface-container"
-                            : active
-                              ? "border-primary-container bg-primary-container/20 shadow-[0_0_15px_rgba(0,209,255,0.15)]"
-                              : "border-outline-variant bg-surface-container"
-                      }`}
-                    >
-                      {isError ? (
-                        <MaterialIcon name="close" size={14} className="text-error" />
-                      ) : done ? (
-                        <MaterialIcon name="check" size={14} className="text-primary-container icon-fill" />
-                      ) : active ? (
-                        <div className="h-2 w-2 animate-pulse rounded-full bg-primary-container" />
-                      ) : null}
-                    </div>
-                  </div>
-                  <div className="pt-0.5">
-                    <p
-                      className={`font-body-md text-body-md ${
-                        active
-                          ? "font-medium text-primary-container"
-                          : done
-                            ? "text-on-surface"
-                            : "text-on-surface-variant"
-                      }`}
-                    >
-                      {stage.label}
-                    </p>
-                    <p className="mt-1 font-mono-sm text-[11px] text-on-surface-variant">
-                      {stage.note}
-                    </p>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </div>
+      <section className="lg:col-span-6" aria-label="Uploads">
+        <h3 className="mb-md text-[15px] font-semibold text-on-surface">Uploads</h3>
+        {items.length === 0 ? (
+          <p className="rounded-2xl border border-outline-variant/30 p-lg text-[14px] leading-relaxed text-on-surface-variant">
+            Files you add appear here with each processing step as it happens.
+          </p>
+        ) : (
+          <ul className="flex flex-col gap-md">
+            {items.map((item) => (
+              <UploadRow key={item.key} item={item} />
+            ))}
+          </ul>
+        )}
+      </section>
     </div>
+  );
+}
+
+function UploadRow({ item }: { item: UploadItem }) {
+  const failed = item.phase === "failed" || item.phase === "rejected";
+  const finished = item.phase === "done" || item.phase === "duplicate";
+  const current = stepIndex(item.phase);
+  return (
+    <li className="rounded-2xl border border-outline-variant/30 bg-surface-container-low p-md" aria-live="polite">
+      <div className="mb-sm flex items-start justify-between gap-md">
+        <div className="min-w-0">
+          <p className="truncate text-[15px] font-medium text-on-surface" title={item.name}>
+            {item.name}
+          </p>
+          <p className="text-[12px] text-on-surface-variant/80">{formatBytes(item.size)}</p>
+        </div>
+        <span
+          className={`shrink-0 text-[13px] font-medium ${
+            failed ? "text-error" : finished ? "text-primary-fixed-dim" : "text-on-surface-variant"
+          }`}
+        >
+          {phaseText(item)}
+        </span>
+      </div>
+
+      <ol className="grid grid-cols-5 gap-xs" aria-label="Processing steps">
+        {STEPS.map((step, index) => {
+          const done = finished || (!failed && index < current);
+          const active = !failed && !finished && index === current;
+          const broken = failed && index === current;
+          const width = active && index === 0 && item.phase === "uploading" ? `${Math.round(item.progress * 100)}%` : undefined;
+          return (
+            <li key={step.label} className="flex flex-col gap-[6px]">
+              <span className="relative h-[5px] overflow-hidden rounded-full bg-surface-container-highest">
+                <span
+                  className={`absolute inset-y-0 left-0 rounded-full transition-[width] duration-300 ${
+                    broken ? "bg-error" : done || active ? "bg-primary-fixed-dim" : ""
+                  } ${active && !width ? "animate-pulse" : ""}`}
+                  style={{ width: broken || done ? "100%" : active ? width ?? "100%" : "0%" }}
+                />
+              </span>
+              <span
+                className={`text-[11px] ${
+                  broken ? "text-error" : done || active ? "text-on-surface" : "text-on-surface-variant/60"
+                }`}
+              >
+                {step.label}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+
+      {item.error ? (
+        <p role="alert" className="mt-sm text-[13px] leading-snug text-error">
+          {item.error}
+        </p>
+      ) : null}
+      {finished && item.documentId ? (
+        <Link href="/documents" className="mt-sm inline-block text-[13px] text-primary-fixed-dim hover:underline">
+          View in Documents
+        </Link>
+      ) : null}
+    </li>
   );
 }

@@ -142,16 +142,21 @@ class FastApiAppTests(unittest.TestCase):
         # only assert the enqueue + job-status contract, not extraction success.
         p = pathlib.Path(tempfile.gettempdir()) / f"fa-{_uuid.uuid4().hex}.txt"
         p.write_text("hello world", encoding="utf-8")
-        r = self.client.post(
-            "/ingest/local",
-            json={"document_id": str(_uuid.uuid4()), "file_path": str(p)},
-            headers={"Authorization": f"Bearer {token}"},
-        )
+        auth = {"Authorization": f"Bearer {token}"}
+        # Off by default: it lets the caller name any file on the server.
+        self.assertEqual(self.client.post("/ingest/local", json={"file_path": str(p)}, headers=auth).status_code, 404)
+        p.write_bytes(b"%PDF-1.4 local ingest " + _uuid.uuid4().hex.encode())
+        p = p.rename(p.with_suffix(".pdf"))
+        with mock.patch.dict(os.environ, {"OMERO_ALLOW_LOCAL_INGEST": "true"}):
+            r = self.client.post("/ingest/local", json={"file_path": str(p)}, headers=auth)
         self.assertEqual(r.status_code, 202, r.text)
         job_id = r.json()["job_id"]
-        s = self.client.get(f"/ingest/jobs/{job_id}", headers={"Authorization": f"Bearer {token}"})
+        s = self.client.get(f"/ingest/jobs/{job_id}", headers=auth)
         self.assertEqual(s.status_code, 200)
         self.assertIn(s.json()["status"], ("uploaded", "processing", "ready", "failed"))
+        # Another tenant cannot read the job.
+        other = {"Authorization": f"Bearer {self._register('fa-ingest-other@example.com')}"}
+        self.assertEqual(self.client.get(f"/ingest/jobs/{job_id}", headers=other).status_code, 404)
 
     def test_stream_returns_sse(self) -> None:
         token = self._register("fa-stream@example.com")

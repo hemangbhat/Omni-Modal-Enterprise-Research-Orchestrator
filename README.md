@@ -12,7 +12,7 @@ A multi-tenant enterprise research platform that ingests PDF and audio documents
 - **Observability** — Sentry distributed tracing across frontend and backend, property-based tests for correctness
 - **Enterprise security** — JWT authentication, RBAC, document-level access control, PII scrubbing, rate limiting, content redaction before external delegation
 - **Performance** — async ingestion queue, connection pooling, query result caching, batch embedding writes
-- **Test quality** — 633 backend tests (unit, HTTP integration, Hypothesis property-based) and 112 frontend tests (API clients and screen-level tests of sign-in, two-step sign-in, password reset, research and the assistant); CI is configured to run both suites
+- **Test quality** — 676 backend tests (unit, HTTP integration, Hypothesis property-based) and 120 frontend tests (API clients and screen-level tests of sign-in, two-step sign-in, password reset, research and the assistant); CI is configured to run both suites
 - **Works locally without a database** — a Postgres-free in-memory path wires ingestion → persistence → retrieval end-to-end so the demo runs out of the box (with a deterministic, non-semantic embedder)
 
 ---
@@ -205,6 +205,25 @@ python -m omni_modal.main         # HTTP server at http://localhost:8000
 
 Reset links are built from `APP_BASE_URL`, so set it to the frontend's public address in deployment. Without `RESEND_API_KEY` the email is only logged by the console adapter.
 
+### Upload and document endpoints
+
+| Endpoint | What it does |
+|---|---|
+| `POST /documents/uploads` | Starts an upload from the file's name, size, type and SHA-256. Returns the existing document if the tenant already has those exact bytes (nothing is processed twice, no quota used); otherwise creates the document record and says where to send the file: a 15-minute presigned S3 URL when `S3_BUCKET` is set, else `PUT /documents/{id}/content` on the API |
+| `PUT /documents/{id}/content` | Receives the file when no object store is configured. Only the uploader may send it, and reading stops as soon as the body passes the declared size |
+| `POST /documents/{id}/complete` | Checks the file arrived with the declared size and queues processing |
+| `GET /documents/{id}` | The document and its latest processing job: stage (`awaiting_upload`, `queued`, `extracting` or `transcribing`, `chunking`, `embedding`, `done`, `failed`), attempts and error |
+| `GET /documents/{id}/download` | A 5-minute presigned link to the original, or the API's own authenticated route |
+| `DELETE /documents/{id}` | Removes the record, the stored file, chunks, embeddings, entities and cached answers. Uploader or admin only |
+| `POST /documents/{id}/reprocess` | Runs processing again from the stored original. Uploader or admin only |
+| `POST /ingest/upload` | One-call upload with the file base64-encoded in JSON, for scripts; same records, duplicate check and jobs |
+
+Processing runs on a worker thread inside the API process (the free hosting tier has no separate worker). Each job's stage, attempt count and error are stored with the document, in Postgres when `DATABASE_URL` is set, so a restart picks unfinished jobs up again; a job that fails three times stops with its last error. Problems with the file itself (unreadable, no text, bytes that do not match the announced hash) fail at once with the reason; database or network trouble is retried. Upload slots never completed within a day are cleaned up at startup. `POST /ingest/local`, which reads a path on the server, is off unless `OMERO_ALLOW_LOCAL_INGEST=true`.
+
+Audio is transcribed by local Whisper when it is installed, otherwise by Groq's hosted Whisper (`whisper-large-v3-turbo`) using `GROQ_API_KEY`, keeping each segment's start and end time for citations. Files over 25 MB cannot be transcribed by the hosted service yet.
+
+For browser uploads straight to S3, the bucket needs a CORS rule allowing `PUT` from the frontend's origin with the `Content-Type` header.
+
 ### Research and assistant endpoints
 
 | Endpoint | What it does |
@@ -226,7 +245,7 @@ Model defaults: `GROQ_MODEL=openai/gpt-oss-120b`, `GEMINI_MODEL=gemini-flash-lat
 ### Tests
 
 ```bash
-# Backend unit, property-based and HTTP integration tests (633 tests).
+# Backend unit, property-based and HTTP integration tests (676 tests).
 # The suite never reads your .env, so it does not use your real keys or database.
 cd services/api && python -m pytest tests
 
@@ -472,7 +491,7 @@ The project's Neon database was adopted this way on 2026-10-11 (0001 to 0007 rec
 ### Production considerations
 
 - Audit events are written to Postgres (`audit_events`, migration `0007`) when `DATABASE_URL` is set; without a database they are kept in memory only
-- The rate limiter, query cache, and ingestion queue are **Redis-backed when `REDIS_URL` is set** (shared across instances → stateless, horizontally-scalable web tier); they fall back to in-process implementations when it is unset
+- The rate limiter and query cache are **Redis-backed when `REDIS_URL` is set** (shared across instances); they fall back to in-process implementations when it is unset. Ingestion jobs are recorded in Postgres and run in the API process, so running several API instances would need a shared job dispatcher (the Redis queue module is the starting point)
 - Auth uses **short-lived access tokens + rotating refresh tokens** with server-side revocation and reuse detection (`/auth/refresh`, `/auth/logout`), optional **two-step sign-in (TOTP)**, and **password reset by email**. The refresh store is Redis-backed when `REDIS_URL` is set; without Redis it is in-process, so a restart signs users out. Still on the roadmap: httpOnly-cookie storage (tokens are in `localStorage` today), social OAuth, and email verification
 - For a dedicated worker tier, run `python -m omni_modal.ingestion.redis_worker` as a separate process and set `INGEST_WORKER_IN_PROCESS=false` on the web service (see `render.yaml`)
 
@@ -488,7 +507,7 @@ The backend runs on **FastAPI** (`omni_modal.api`, run with `python -m omni_moda
 Unit tests catch known cases; property tests find unknown edge cases. The 34+ PBT tests cover correctness invariants: JWT round-trips, PII scrubbing completeness, rate limiter window boundaries, batch partitioning, cache eviction, etc.
 
 **Why a Redis-backed rate limiter, cache, and queue (with in-process fallback)?**
-For horizontal scaling, the rate-limit counters, query cache, and ingestion queue must be shared state — otherwise every web instance has its own and the "scalable SaaS" claim breaks down. When `REDIS_URL` is set, all three move to Redis: a sliding-window limiter (sorted sets), a shared TTL cache, and a durable job queue with retries + dead-letter and a separable worker tier (`python -m omni_modal.ingestion.redis_worker`). Each component is injected via the constructor and degrades to its in-process implementation when Redis is absent or unreachable, so the offline/demo path keeps working with zero configuration. Tested end-to-end with `fakeredis` (no live server required).
+For horizontal scaling, the rate-limit counters and query cache must be shared state — otherwise every web instance has its own. When `REDIS_URL` is set, both move to Redis: a sliding-window limiter (sorted sets) and a shared TTL cache. A Redis job queue with retries, dead-letter and a separate worker process also exists (`python -m omni_modal.ingestion.redis_worker`), but uploads currently use Postgres job records and an in-process worker, because the deployment has no Redis or worker service. Each component is injected via the constructor and degrades to its in-process implementation when Redis is absent or unreachable, so the offline/demo path keeps working with zero configuration. Tested end-to-end with `fakeredis` (no live server required).
 
 **Why short-lived access tokens + rotating refresh tokens?**
 A single long-lived JWT can't be revoked if it leaks. The auth flow issues a short-lived access token (default 15 min, `ACCESS_TOKEN_TTL_SECONDS`) plus a long-lived, server-stored refresh token (default 30 days). `/auth/refresh` rotates the refresh token on every use and invalidates the previous one; replaying a rotated token triggers **reuse detection** that revokes the whole token family (theft mitigation). `/auth/logout` revokes immediately. Only SHA-256 hashes of refresh tokens are stored, in Redis (shared + revocable across instances) when `REDIS_URL` is set, else in-process. The browser renews silently before expiry. Remaining hardening (httpOnly cookies, OAuth, email verification) is documented as roadmap, not claimed as done.
@@ -503,8 +522,8 @@ Internal document chunks must never leave the tenant security boundary. The `Red
 ### Implemented ✅
 
 - Next.js 16 App Router frontend with routing, Tailwind CSS, Sentry error boundary, upload validation
-- **Frontend wired to the backend**: `/upload` sends files (base64) to `/ingest/upload` and polls job status; `/research` streams answers from `/query/stream` (real SSE parsing) and renders citations
-- **End-to-end local path (no DB)**: `/ingest/upload` → background worker → `InMemoryChunkPersistence` → `InMemoryVectorStore` → `InMemoryChunkRetriever` returns ranked cosine-similarity results
+- **Frontend wired to the backend**: `/upload` hashes each file in the browser, sends it straight to storage and shows every processing stage live; `/documents` downloads, deletes and reprocesses; `/research` streams answers from `/query/stream` and renders checked citations
+- **End-to-end local path (no DB)**: upload → `DocumentService` job → `InMemoryChunkPersistence` → `InMemoryVectorStore` → `InMemoryChunkRetriever` returns ranked cosine-similarity results
 - Python HTTP backend: ingestion pipeline, vector retrieval, MCP tool server, ADK workflow orchestration
 - **All pages wired to live backend data**: Dashboard (`/health`), Documents (`/documents` + `/entities`), Projects (`/projects`), Archives (`/archives`), Settings (`/health`)
 - **Startup log**: backend prints active path (in-memory vs pgvector), embedding backend, Whisper model, NER model, and Sentry status on startup
@@ -520,19 +539,19 @@ Internal document chunks must never leave the tenant security boundary. The `Red
 - InMemoryAuditSink with monotonic IDs and argument scrubbing
 - ConnectionPool singleton (`psycopg_pool`, double-checked locking)
 - QueryCache (LRU + TTL via `cachetools`, tenant eviction secondary index)
-- AsyncIngestionQueue with BackgroundWorker daemon thread and watchdog restart
-- **Horizontal scaling (Redis):** distributed sliding-window rate limiter, shared query cache, and a durable ingestion queue (retries + dead-letter) with a separable worker tier (`python -m omni_modal.ingestion.redis_worker`) — all behind factories that fall back to in-process when `REDIS_URL` is unset
+- **Durable ingestion:** document and job records in Postgres (`0012_durable_ingestion.sql`), direct-to-storage uploads, duplicate detection by content hash, retries, resume after restart, delete, reprocess and download
+- **Horizontal scaling (Redis):** distributed sliding-window rate limiter and shared query cache behind factories that fall back to in-process when `REDIS_URL` is unset. A Redis job queue with a separate worker process (`python -m omni_modal.ingestion.redis_worker`) exists as a module, but the upload flow does not use it: jobs run in the API process with their record in Postgres
 - **Auth lifecycle:** short-lived access JWTs + rotating refresh tokens with reuse detection and server-side revocation (`/auth/refresh`, `/auth/logout`); refresh store is Redis-backed when configured; frontend renews silently
 - **Observability:** Prometheus metrics at `/metrics`, readiness probe at `/health/ready`, structured JSON access logs, and end-to-end `X-Correlation-ID` propagation
 - **Data hardening:** idempotent migration runner (`scripts/migrate.py` + `schema_migrations`) and Postgres Row-Level Security policies (`0008_rls.sql`) for database-enforced tenant isolation
 - **Account security:** two-step sign-in with any authenticator app (RFC 6238 TOTP). Codes are single-use; five wrong codes lock the second step for 15 minutes; turning it on re-checks the password and an active authenticator cannot be replaced without turning it off first. Password reset by emailed link: single-use, 30-minute expiry, stored hashed, capped at 3 per address per hour, revokes every refresh token. Both persist in Postgres (`0009_auth_recovery.sql`) when `DATABASE_URL` is set and `psycopg-pool` is installed (the Docker images install it); if the database is configured but unusable, the fallback to memory is reported to Sentry and the log rather than happening silently
 - **Billing dunning:** `invoice.payment_failed` webhook notifies the org owner (in addition to checkout/subscription sync)
 - Benchmark harness (`python -m omni_modal.benchmark`, atomic JSON output)
-- 567 backend tests (unit, HTTP integration, Hypothesis property-based) and 95 frontend tests (Vitest + Testing Library). See also `docs/operations.md` for the production runbook.
+- Backend and frontend test suites (counts at the top of this README). See also `docs/operations.md` for the production runbook.
 
 ### Not Implemented (Stubs / Interfaces Only) ⚠️
 
-- **Whisper transcription** — `LocalWhisperTranscriber` is wired. Set `WHISPER_MODEL_PATH=base` (or any model size) to activate. Requires Whisper CLI on PATH (`pip install openai-whisper`).
+- **Whisper transcription** — local Whisper is used when its CLI is on PATH and `WHISPER_MODEL_PATH` is set; otherwise Groq's hosted Whisper when `GROQ_API_KEY` is set. Without either, audio uploads fail with a clear message.
 - **Entity extraction** — `EntityExtractionService` runs automatically post-ingestion. Rule-based by default; set `ENTITY_NER_MODEL_PATH=dslim/bert-base-NER` for a pretrained Hugging Face NER model (free, ~420 MB). Entities are exposed via `GET /entities/:document_id`. No model in this project is fine-tuned.
 - **Semantic embeddings are pluggable** — `EMBEDDING_BACKEND` selects `hashing` (deterministic offline fallback, 1536-dim), `openai` (real, 1536-dim), or `sentence-transformers` (real local, default model `BAAI/bge-small-en-v1.5`, 384-dim, with automatic bge/e5 query prefixing). The offline demo defaults to hashing so it needs no keys.
 - **pgvector ingestion persistence — wired end-to-end.** When `DATABASE_URL` is set, ingestion persists `documents → document_chunks → embeddings(vector)` via `PostgresChunkPersistence`, and the `PgVectorChunkRetriever` performs real cosine/HNSW semantic search over that content. Verified on Neon (a relevant chunk ranks top). The `embeddings` column is `vector(384)` after migration `0004_embeddings_384.sql` to match the local model; use a 1536-dim model + the original column if you prefer OpenAI. The in-memory path remains the offline fallback when `DATABASE_URL` is unset.
@@ -549,13 +568,12 @@ Internal document chunks must never leave the tenant security boundary. The `Red
 
 Audited on 2026-10-11 against the target product description. These are not built yet; the plan and order are in `docs/superpowers/specs/2026-10-11-omero-completion-design.md`.
 
-- **Research:** answers are generated in full and then sent in pieces, so streaming is simulated. Each question is independent (no follow-ups). Query history lives only in the browser. There is no full-text or hybrid search and no reranker. Citations show a chunk index, not the page number or audio timestamp that ingestion already captures.
-- **Uploads:** files are sent as base64 inside a JSON request and written to a temp directory. The S3 adapter exists but the upload route does not use it. Ingestion job state lives in Redis or memory, not Postgres. There is no delete, reprocess, download or duplicate detection.
+- **Research:** no full-text or hybrid search and no reranker yet; they are planned together with a measured retrieval evaluation, so they are only switched on if they help.
 - **Projects and archives:** there is no projects table and no archive action. The Projects and Archives pages each list one row per indexed document.
 - **External research:** the delegation client is generic and off unless an endpoint is configured; no provider is wired.
 - **Billing:** no pricing page and no billing history view.
-- **Operations:** no view of failed ingestion jobs; the readiness probe does not check storage or the model provider; backup and recovery are not documented.
-- **Deployment:** the Render free tier runs the hashing embedder, which is not semantic, and cannot run Whisper, so audio transcription does not work there.
+- **Operations:** no admin view of failed ingestion jobs; the readiness probe does not check storage or the model provider; backup and recovery are not documented.
+- **Deployment:** the Render free tier runs the hashing embedder, which is not semantic.
 - **Frontend:** no browser end-to-end test. `npm run lint` is broken (`next lint` was removed in Next.js 16).
 - **Fresh databases:** `0002_perf.sql` contains `ALTER DATABASE current_database() SET ...`, which does not look like valid SQL, and the live database was missing that file's covering index until it was added by hand on 2026-10-11. Building a new database from the migration files alone has not been tested and may stop at 0002.
 - **Docker image:** the image with the new dependency set has not been built locally; the first Render deploy is its first build.

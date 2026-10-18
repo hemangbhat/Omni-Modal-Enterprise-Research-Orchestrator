@@ -6,6 +6,8 @@ ENDPOINT_ROLES: dict[str, frozenset[str]] = {
     "/ingest/local":   frozenset({"researcher", "admin"}),
     "/ingest/upload":  frozenset({"researcher", "admin"}),
     "/documents":      frozenset({"researcher", "admin", "auditor"}),
+    # Deleting or reprocessing; the service also requires the uploader or an admin.
+    "/documents/manage": frozenset({"researcher", "admin"}),
     "/projects":       frozenset({"researcher", "admin", "auditor"}),
     "/archives":       frozenset({"researcher", "admin", "auditor"}),
     # Saved sessions are private to their owner; any role may keep its own.

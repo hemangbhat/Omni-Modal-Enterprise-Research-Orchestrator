@@ -1,10 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { MaterialIcon } from "@/components/material-icon";
 import { apiRequest } from "@/lib/api-client";
 import { getClientApiConfig } from "@/lib/env";
+import {
+  deleteDocument,
+  downloadDocument,
+  formatBytes,
+  reprocessDocument
+} from "@/lib/documents-api";
 import { withWorkspaceQuery } from "@/lib/workspace";
 
 type DocStatus = "ready" | "processing" | "uploaded" | "failed";
@@ -15,7 +21,17 @@ type LiveDoc = {
   source_kind: string;
   chunk_count: number;
   status: DocStatus;
+  // Present for documents uploaded through the durable flow.
+  file_name?: string;
+  size_bytes?: number;
+  created_at?: number;
+  error_message?: string | null;
 };
+
+function formatDate(epochSeconds?: number): string {
+  if (!epochSeconds) return "—";
+  return new Date(epochSeconds * 1000).toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" });
+}
 
 type EntityRecord = {
   id: string;
@@ -91,24 +107,67 @@ export default function DocumentsPage() {
   const headers: Record<string, string> = {};
   if (token) headers.Authorization = `Bearer ${token}`;
 
-  useEffect(() => {
-    setLoading(true);
-    apiRequest(withWorkspaceQuery("/documents"), { method: "GET", headers }, { baseUrl })
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      })
-      .then((data: { documents: LiveDoc[] }) => {
-        setDocs(data.documents ?? []);
-        setError(null);
-      })
-      .catch((err: Error) => {
-        setError(err.message);
-      })
-      .finally(() => setLoading(false));
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const load = useCallback(async (quiet = false) => {
+    if (!quiet) setLoading(true);
+    try {
+      const r = await apiRequest(withWorkspaceQuery("/documents"), { method: "GET", headers }, { baseUrl });
+      if (!r.ok) throw new Error(`The document list could not be loaded (HTTP ${r.status}).`);
+      const data = (await r.json()) as { documents: LiveDoc[] };
+      setDocs(data.documents ?? []);
+      setError(null);
+    } catch (err) {
+      if (!quiet) setError(err instanceof Error ? err.message : "The document list could not be loaded.");
+    } finally {
+      if (!quiet) setLoading(false);
+    }
+    // headers/baseUrl come from the signed-in session and do not change while mounted.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  // While anything is being processed, refresh quietly, for at most 15 minutes.
+  // An upload slot nobody finished stays "uploaded"; after 30 minutes it no
+  // longer counts as in progress (the server clears it after a day).
+  const pending = docs.some(
+    (d) =>
+      d.status === "processing" ||
+      (d.status === "uploaded" && (!d.created_at || Date.now() / 1000 - d.created_at < 30 * 60))
+  );
+  useEffect(() => {
+    if (!pending) return;
+    const started = Date.now();
+    const timer = window.setInterval(() => {
+      if (Date.now() - started > 15 * 60 * 1000) {
+        window.clearInterval(timer);
+        return;
+      }
+      void load(true);
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [pending, load]);
+
+  async function runAction(name: string, action: () => Promise<unknown>) {
+    setBusyAction(name);
+    setActionError(null);
+    try {
+      await action();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "That did not work. Try again.");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   function selectDoc(doc: LiveDoc) {
+    setConfirmDelete(false);
+    setActionError(null);
     setSelectedId(doc.document_id);
     setInspectorOpen(true);
     setEntities([]);
@@ -128,8 +187,8 @@ export default function DocumentsPage() {
   );
 
   return (
-    <main className="relative flex flex-1 flex-col overflow-hidden bg-surface">
-      <div className="pointer-events-none absolute -right-[10%] -top-[20%] h-[600px] w-[600px] rounded-full bg-primary-container/5 blur-[120px]" />
+    <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-surface">
+      <div className="pointer-events-none absolute right-0 top-0 h-[600px] w-[600px] -translate-y-1/4 rounded-full bg-primary-container/5 blur-[120px]" />
 
       {/* Page header */}
       <div className="relative z-10 flex flex-col justify-between gap-md border-b border-outline-variant/10 bg-surface/40 px-xl pb-lg pt-xl backdrop-blur-sm sm:flex-row sm:items-end">
@@ -169,15 +228,19 @@ export default function DocumentsPage() {
 
       {/* Workspace */}
       <div className="relative z-10 flex flex-1 overflow-hidden">
-        <div className="flex-1 overflow-y-auto px-xl py-lg">
+        <div className="min-w-0 flex-1 overflow-y-auto px-xl py-lg">
           {error ? (
             <div className="flex flex-col items-center justify-center rounded-xl border border-error/20 bg-error-container/10 p-xl text-center">
               <MaterialIcon name="error_outline" size={40} className="mb-md text-error" />
               <h3 className="mb-sm font-headline-md text-headline-md text-on-surface">Failed to load documents</h3>
               <p className="font-body-md text-body-md text-on-surface-variant">{error}</p>
-              <p className="mt-sm font-mono-sm text-mono-sm text-on-surface-variant">
-                Ensure the backend is running and NEXT_PUBLIC_API_TOKEN is set.
-              </p>
+              <button
+                type="button"
+                onClick={() => void load()}
+                className="mt-md rounded-lg border border-outline-variant px-md py-sm text-[14px] text-primary"
+              >
+                Try again
+              </button>
             </div>
           ) : loading ? (
             <div className="flex items-center justify-center py-xl">
@@ -211,7 +274,8 @@ export default function DocumentsPage() {
                   <tr className="border-b border-outline-variant/20">
                     <th className="px-md py-sm font-label-md text-label-md font-medium text-on-surface-variant">Name</th>
                     <th className="px-md py-sm font-label-md text-label-md font-medium text-on-surface-variant">Type</th>
-                    <th className="px-md py-sm font-label-md text-label-md font-medium text-on-surface-variant">Chunks</th>
+                    <th className="hidden px-md py-sm font-label-md text-label-md font-medium text-on-surface-variant md:table-cell">Size</th>
+                    <th className="hidden px-md py-sm font-label-md text-label-md font-medium text-on-surface-variant md:table-cell">Added</th>
                     <th className="px-md py-sm font-label-md text-label-md font-medium text-on-surface-variant">Status</th>
                   </tr>
                 </thead>
@@ -236,14 +300,25 @@ export default function DocumentsPage() {
                             </div>
                             <div>
                               <div className="max-w-[260px] truncate font-medium text-on-surface">{doc.title}</div>
-                              <div className="font-mono-sm text-mono-sm text-on-surface-variant/60 truncate max-w-[260px]">
-                                ID: {doc.document_id.slice(0, 8)}…
-                              </div>
+                              {doc.status === "failed" && doc.error_message ? (
+                                <div className="max-w-[260px] truncate text-[12px] text-error" title={doc.error_message}>
+                                  {doc.error_message}
+                                </div>
+                              ) : doc.file_name && doc.file_name !== doc.title ? (
+                                <div className="max-w-[260px] truncate text-[12px] text-on-surface-variant/70">
+                                  {doc.file_name}
+                                </div>
+                              ) : null}
                             </div>
                           </div>
                         </td>
                         <td className="px-md py-md capitalize text-on-surface-variant">{doc.source_kind}</td>
-                        <td className="px-md py-md font-mono-sm text-on-surface-variant">{doc.chunk_count}</td>
+                        <td className="hidden px-md py-md text-[14px] text-on-surface-variant md:table-cell">
+                          {doc.size_bytes ? formatBytes(doc.size_bytes) : "—"}
+                        </td>
+                        <td className="hidden px-md py-md text-[14px] text-on-surface-variant md:table-cell">
+                          {formatDate(doc.created_at)}
+                        </td>
                         <td className="px-md py-md">
                           <StatusPill status={doc.status} />
                         </td>
@@ -274,6 +349,8 @@ export default function DocumentsPage() {
                 </div>
               </div>
               <button
+                type="button"
+                aria-label="Close document details"
                 onClick={() => setInspectorOpen(false)}
                 className="rounded p-1 text-on-surface-variant transition-colors hover:bg-surface-container hover:text-on-surface"
               >
@@ -284,11 +361,83 @@ export default function DocumentsPage() {
             <div className="flex flex-1 flex-col gap-xl overflow-y-auto p-lg">
               <div className="flex flex-col gap-sm">
                 <Link
-                  href={`/research?document_id=${selected.document_id}`}
-                  className="flex w-full items-center justify-center gap-sm rounded-lg bg-gradient-to-r from-primary-fixed-dim to-primary-container py-md font-label-md text-label-md text-on-primary-container shadow-[0_4px_14px_rgba(0,218,243,0.2)] transition-all hover:shadow-[0_6px_20px_rgba(0,218,243,0.3)]"
+                  href="/research"
+                  className="flex w-full items-center justify-center gap-sm rounded-lg bg-primary-fixed-dim py-md text-[14px] font-semibold text-on-primary-fixed transition-opacity hover:opacity-90"
                 >
-                  <MaterialIcon name="science" size={18} /> Open in Research
+                  <MaterialIcon name="science" size={18} /> Ask about your documents
                 </Link>
+                {selected.size_bytes ? (
+                  <div className="grid grid-cols-2 gap-sm">
+                    <button
+                      type="button"
+                      disabled={busyAction !== null}
+                      onClick={() => void runAction("download", () => downloadDocument(selected.document_id))}
+                      className="flex items-center justify-center gap-xs rounded-lg border border-outline-variant/40 py-sm text-[13px] text-on-surface hover:bg-surface-container disabled:opacity-50"
+                    >
+                      <MaterialIcon name="download" size={16} />
+                      {busyAction === "download" ? "Preparing…" : "Download"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busyAction !== null || selected.status === "uploaded" || selected.status === "processing"}
+                      onClick={() =>
+                        void runAction("reprocess", async () => {
+                          await reprocessDocument(selected.document_id);
+                          await load(true);
+                        })
+                      }
+                      className="flex items-center justify-center gap-xs rounded-lg border border-outline-variant/40 py-sm text-[13px] text-on-surface hover:bg-surface-container disabled:opacity-50"
+                    >
+                      <MaterialIcon name="refresh" size={16} />
+                      {busyAction === "reprocess" ? "Starting…" : "Reprocess"}
+                    </button>
+                  </div>
+                ) : null}
+                {confirmDelete ? (
+                  <div className="rounded-lg border border-error/30 bg-error-container/10 p-sm text-[13px]">
+                    <p className="mb-sm text-on-surface">
+                      Delete this document, its search index and its file? This cannot be undone.
+                    </p>
+                    <div className="flex gap-sm">
+                      <button
+                        type="button"
+                        disabled={busyAction !== null}
+                        onClick={() =>
+                          void runAction("delete", async () => {
+                            await deleteDocument(selected.document_id);
+                            setInspectorOpen(false);
+                            setSelectedId(null);
+                            setConfirmDelete(false);
+                            await load(true);
+                          })
+                        }
+                        className="rounded-md bg-error px-md py-xs font-semibold text-on-error disabled:opacity-50"
+                      >
+                        {busyAction === "delete" ? "Deleting…" : "Delete"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDelete(false)}
+                        className="rounded-md px-md py-xs text-on-surface-variant"
+                      >
+                        Keep it
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDelete(true)}
+                    className="flex items-center justify-center gap-xs rounded-lg py-sm text-[13px] text-on-surface-variant hover:text-error"
+                  >
+                    <MaterialIcon name="delete" size={16} /> Delete document
+                  </button>
+                )}
+                {actionError ? (
+                  <p role="alert" className="text-[13px] text-error">
+                    {actionError}
+                  </p>
+                ) : null}
               </div>
 
               <div>
@@ -296,13 +445,20 @@ export default function DocumentsPage() {
                   Document Info
                 </h4>
                 <div className="flex flex-col gap-md">
-                  <MetaRow label="Document ID" value={selected.document_id.slice(0, 16) + "…"} />
+                  {selected.file_name ? <MetaRow label="File" value={selected.file_name} /> : null}
                   <MetaRow label="Type" value={selected.source_kind.toUpperCase()} />
-                  <MetaRow label="Chunks" value={String(selected.chunk_count)} />
+                  {selected.size_bytes ? <MetaRow label="Size" value={formatBytes(selected.size_bytes)} /> : null}
+                  {selected.created_at ? <MetaRow label="Added" value={formatDate(selected.created_at)} /> : null}
+                  <MetaRow label="Passages" value={String(selected.chunk_count)} />
                   <div className="flex items-center justify-between">
                     <span className="font-label-md text-label-md text-on-surface-variant">Status</span>
                     <StatusPill status={selected.status} />
                   </div>
+                  {selected.status === "failed" && selected.error_message ? (
+                    <p className="rounded-lg bg-error-container/10 p-sm text-[13px] leading-snug text-error">
+                      {selected.error_message}
+                    </p>
+                  ) : null}
                 </div>
               </div>
 
@@ -353,7 +509,9 @@ function MetaRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-center justify-between">
       <span className="font-label-md text-label-md text-on-surface-variant">{label}</span>
-      <span className="font-mono-sm text-mono-sm text-on-surface">{value}</span>
+      <span className="max-w-[180px] truncate text-right text-[13px] text-on-surface" title={value}>
+        {value}
+      </span>
     </div>
   );
 }

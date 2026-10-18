@@ -42,6 +42,8 @@ class SessionSummary:
     title: str
     created_at: float
     updated_at: float
+    # The project whose documents this session searches, if any.
+    project_id: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -94,24 +96,28 @@ class InMemorySessionStore:
 
     @staticmethod
     def _summary(session_id: str, row: dict) -> SessionSummary:
-        return SessionSummary(session_id, row["kind"], row["title"], row["created_at"], row["updated_at"])
+        return SessionSummary(session_id, row["kind"], row["title"], row["created_at"], row["updated_at"],
+                              row.get("project_id"))
 
-    def create(self, tenant_id: str, user_id: str, kind: str, title: str) -> SessionSummary:
+    def create(self, tenant_id: str, user_id: str, kind: str, title: str,
+               project_id: str | None = None) -> SessionSummary:
         with self._lock:
             now = self._now()
             session_id = uuid.uuid4().hex
             self._rows[session_id] = {
                 "tenant_id": tenant_id, "user_id": user_id, "kind": kind, "title": title,
-                "created_at": now, "updated_at": now, "messages": [],
+                "created_at": now, "updated_at": now, "messages": [], "project_id": project_id,
             }
             return self._summary(session_id, self._rows[session_id])
 
-    def list(self, tenant_id: str, user_id: str, kind: str | None, limit: int) -> list[SessionSummary]:
+    def list(self, tenant_id: str, user_id: str, kind: str | None, limit: int,
+             project_id: str | None = None) -> list[SessionSummary]:
         with self._lock:
             rows = [
                 self._summary(sid, row) for sid, row in self._rows.items()
                 if row["tenant_id"] == tenant_id and row["user_id"] == user_id
                 and (kind is None or row["kind"] == kind)
+                and (project_id is None or row.get("project_id") == project_id)
             ]
         rows.sort(key=lambda s: s.updated_at, reverse=True)
         return rows[:limit]
@@ -127,6 +133,20 @@ class InMemorySessionStore:
             row["title"] = title
             row["updated_at"] = self._now()
             return self._summary(session_id, row)
+
+    def set_project(self, tenant_id: str, user_id: str, session_id: str, project_id: str | None) -> SessionSummary:
+        with self._lock:
+            row = self._owned(tenant_id, user_id, session_id)
+            row["project_id"] = project_id
+            row["updated_at"] = self._now()
+            return self._summary(session_id, row)
+
+    def clear_project(self, tenant_id: str, project_id: str) -> None:
+        """A project removed: its sessions stay, unlinked (ON DELETE SET NULL in Postgres)."""
+        with self._lock:
+            for row in self._rows.values():
+                if row["tenant_id"] == tenant_id and row.get("project_id") == project_id:
+                    row["project_id"] = None
 
     def delete(self, tenant_id: str, user_id: str, session_id: str) -> None:
         with self._lock:
@@ -153,31 +173,34 @@ class PostgresSessionStore:
 
     @staticmethod
     def _summary(row) -> SessionSummary:
-        return SessionSummary(row[0], row[1], row[2], row[3].timestamp(), row[4].timestamp())
+        return SessionSummary(row[0], row[1], row[2], row[3].timestamp(), row[4].timestamp(), row[5])
 
-    def create(self, tenant_id: str, user_id: str, kind: str, title: str) -> SessionSummary:
+    def create(self, tenant_id: str, user_id: str, kind: str, title: str,
+               project_id: str | None = None) -> SessionSummary:
         with self._pool.connection() as conn, conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO research_sessions (id, tenant_id, user_id, kind, title)
-                   VALUES (%s, %s, %s, %s, %s)
-                   RETURNING id, kind, title, created_at, updated_at""",
-                (uuid.uuid4().hex, tenant_id, user_id, kind, title),
+                """INSERT INTO research_sessions (id, tenant_id, user_id, kind, title, project_id)
+                   VALUES (%s, %s, %s, %s, %s, %s)
+                   RETURNING id, kind, title, created_at, updated_at, project_id""",
+                (uuid.uuid4().hex, tenant_id, user_id, kind, title, project_id),
             )
             return self._summary(cur.fetchone())
 
-    def list(self, tenant_id: str, user_id: str, kind: str | None, limit: int) -> list[SessionSummary]:
+    def list(self, tenant_id: str, user_id: str, kind: str | None, limit: int,
+             project_id: str | None = None) -> list[SessionSummary]:
         with self._pool.connection() as conn, conn.cursor() as cur:
             cur.execute(
-                """SELECT id, kind, title, created_at, updated_at FROM research_sessions
+                """SELECT id, kind, title, created_at, updated_at, project_id FROM research_sessions
                    WHERE tenant_id = %s AND user_id = %s AND (%s::text IS NULL OR kind = %s)
+                     AND (%s::text IS NULL OR project_id = %s)
                    ORDER BY updated_at DESC LIMIT %s""",
-                (tenant_id, user_id, kind, kind, limit),
+                (tenant_id, user_id, kind, kind, project_id, project_id, limit),
             )
             return [self._summary(r) for r in cur.fetchall()]
 
     def _owned_summary(self, cur, tenant_id: str, user_id: str, session_id: str) -> SessionSummary:
         cur.execute(
-            """SELECT id, kind, title, created_at, updated_at FROM research_sessions
+            """SELECT id, kind, title, created_at, updated_at, project_id FROM research_sessions
                WHERE id = %s AND tenant_id = %s AND user_id = %s""",
             (session_id, tenant_id, user_id),
         )
@@ -205,13 +228,29 @@ class PostgresSessionStore:
             cur.execute(
                 """UPDATE research_sessions SET title = %s, updated_at = now()
                    WHERE id = %s AND tenant_id = %s AND user_id = %s
-                   RETURNING id, kind, title, created_at, updated_at""",
+                   RETURNING id, kind, title, created_at, updated_at, project_id""",
                 (title, session_id, tenant_id, user_id),
             )
             row = cur.fetchone()
         if row is None:
             raise SessionNotFound(session_id)
         return self._summary(row)
+
+    def set_project(self, tenant_id: str, user_id: str, session_id: str, project_id: str | None) -> SessionSummary:
+        with self._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """UPDATE research_sessions SET project_id = %s, updated_at = now()
+                   WHERE id = %s AND tenant_id = %s AND user_id = %s
+                   RETURNING id, kind, title, created_at, updated_at, project_id""",
+                (project_id, session_id, tenant_id, user_id),
+            )
+            row = cur.fetchone()
+        if row is None:
+            raise SessionNotFound(session_id)
+        return self._summary(row)
+
+    def clear_project(self, tenant_id: str, project_id: str) -> None:
+        pass  # ON DELETE SET NULL
 
     def delete(self, tenant_id: str, user_id: str, session_id: str) -> None:
         with self._pool.connection() as conn, conn.cursor() as cur:
@@ -261,13 +300,20 @@ class ResearchSessionService:
     def __init__(self, store=None) -> None:
         self._store = store or InMemorySessionStore()
 
-    def create(self, tenant_id: str, user_id: str, *, title: str | None = None, kind: str = "research") -> SessionSummary:
+    def create(self, tenant_id: str, user_id: str, *, title: str | None = None, kind: str = "research",
+               project_id: str | None = None) -> SessionSummary:
+        """``project_id`` must already be checked as the caller's tenant's project."""
         if kind not in _KINDS:
             raise ValueError(f"Unknown session kind: {kind}")
-        return self._store.create(tenant_id, user_id, kind, clean_title(title))
+        return self._store.create(tenant_id, user_id, kind, clean_title(title), project_id)
 
-    def list(self, tenant_id: str, user_id: str, *, kind: str | None = None, limit: int = 50) -> list[SessionSummary]:
-        return self._store.list(tenant_id, user_id, kind, max(1, min(limit, 200)))
+    def list(self, tenant_id: str, user_id: str, *, kind: str | None = None, limit: int = 50,
+             project_id: str | None = None) -> list[SessionSummary]:
+        return self._store.list(tenant_id, user_id, kind, max(1, min(limit, 200)), project_id)
+
+    def set_project(self, tenant_id: str, user_id: str, session_id: str, project_id: str | None) -> SessionSummary:
+        """``project_id`` must already be checked as the caller's tenant's project."""
+        return self._store.set_project(tenant_id, user_id, session_id, project_id)
 
     def get(self, tenant_id: str, user_id: str, session_id: str) -> SessionDetail:
         return self._store.get(tenant_id, user_id, session_id)

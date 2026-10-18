@@ -1,236 +1,207 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useState } from "react";
 import { MaterialIcon } from "@/components/material-icon";
 import { TopBar } from "@/components/top-bar";
-import { apiRequest } from "@/lib/api-client";
-import { getClientApiConfig } from "@/lib/env";
-import { withWorkspaceQuery } from "@/lib/workspace";
+import { createProject, listProjects, type ProjectListEntry } from "@/lib/projects-api";
 
-type LiveProject = {
-  id: string;
-  code: string;
-  name: string;
-  icon: string;
-  source_kind: string;
-  chunk_count: number;
-};
+function updatedText(epochSeconds: number): string {
+  const days = Math.floor((Date.now() / 1000 - epochSeconds) / 86400);
+  if (days <= 0) return "Updated today";
+  if (days === 1) return "Updated yesterday";
+  if (days < 30) return `Updated ${days} days ago`;
+  return `Updated ${new Date(epochSeconds * 1000).toLocaleDateString([], { month: "short", day: "numeric" })}`;
+}
 
 export default function ProjectsPage() {
-  const [projects, setProjects] = useState<LiveProject[]>([]);
+  const router = useRouter();
+  const [projects, setProjects] = useState<ProjectListEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [open, setOpen] = useState(false);
-  const [search, setSearch] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
 
-  const { baseUrl, token } = getClientApiConfig();
-  const headers: Record<string, string> = {};
-  if (token) headers.Authorization = `Bearer ${token}`;
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      setProjects(await listProjects(showArchived));
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Projects could not be loaded.");
+    } finally {
+      setLoading(false);
+    }
+  }, [showArchived]);
 
   useEffect(() => {
-    setLoading(true);
-    apiRequest(withWorkspaceQuery("/projects"), { method: "GET", headers }, { baseUrl })
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      })
-      .then((data: { projects: LiveProject[] }) => {
-        setProjects(data.projects ?? []);
-        if (data.projects?.length > 0) {
-          setSelectedId(data.projects[0].id);
-          setOpen(true);
-        }
-        setError(null);
-      })
-      .catch((err: Error) => setError(err.message))
-      .finally(() => setLoading(false));
-  }, []);
+    void load();
+  }, [load]);
 
-  const selected = projects.find((p) => p.id === selectedId);
-  const filtered = projects.filter(
-    (p) => !search || p.name.toLowerCase().includes(search.toLowerCase())
-  );
+  async function submit() {
+    if (!name.trim() || saving) return;
+    setSaving(true);
+    setFormError(null);
+    try {
+      const project = await createProject(name.trim(), description.trim());
+      router.push(`/projects/${project.id}`);
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : "The project could not be created.");
+      setSaving(false);
+    }
+  }
 
   return (
-    <main className="relative flex flex-1 overflow-hidden bg-surface">
-      <div className="flex min-w-0 flex-1 flex-col">
-        <TopBar searchPlaceholder="Search across workspace..." />
-        <div className="flex-1 overflow-y-auto px-xl py-lg">
-          <div className="mx-auto flex w-full max-w-[1600px] flex-col">
-
-            {/* Header */}
-            <div className="mb-lg flex flex-col justify-between gap-md sm:flex-row sm:items-end">
-              <div>
-                <h2 className="mb-xs font-headline-lg text-headline-lg text-on-surface">
-                  Projects Directory
-                </h2>
-                <p className="font-body-md text-body-md text-on-surface-variant">
-                  {loading ? "Loading projects…" : `${filtered.length} research project${filtered.length !== 1 ? "s" : ""} in your workspace.`}
-                </p>
-              </div>
-              <div className="flex items-center gap-md">
-                <div className="relative">
-                  <MaterialIcon name="search" size={16} className="absolute left-sm top-1/2 -translate-y-1/2 text-on-surface-variant" />
-                  <input
-                    type="text"
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                    placeholder="Search projects…"
-                    className="rounded border border-outline-variant bg-surface-container py-xs pl-xl pr-md font-body-md text-body-md text-on-surface placeholder:text-on-surface-variant/50 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/50"
-                  />
-                </div>
-                <Link
-                  href="/upload"
-                  className="flex items-center gap-sm rounded border border-primary-fixed-dim bg-primary px-md py-[8px] font-label-md text-label-md font-medium text-on-primary transition-all hover:bg-primary-fixed hover:shadow-sm"
-                >
-                  <MaterialIcon name="add" size={18} />
-                  New Project
-                </Link>
-              </div>
+    <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-surface">
+      <TopBar searchPlaceholder="Search documents, projects, research..." />
+      <div className="flex-1 overflow-y-auto px-lg py-xl md:px-xl">
+        <div className="mx-auto flex max-w-6xl flex-col gap-xl">
+          <div className="flex flex-col justify-between gap-md sm:flex-row sm:items-end">
+            <div>
+              <h2 className="text-[30px] font-semibold tracking-tight text-on-surface">Projects</h2>
+              <p className="mt-xs max-w-2xl text-[16px] leading-relaxed text-on-surface-variant">
+                A project gathers the documents, research, findings and reports for one piece of work. Research
+                started in a project only searches that project&apos;s documents.
+              </p>
             </div>
-
-            {/* Content */}
-            {error ? (
-              <div className="flex flex-col items-center justify-center rounded-xl border border-error/20 bg-error-container/10 p-xl text-center">
-                <MaterialIcon name="error_outline" size={40} className="mb-md text-error" />
-                <h3 className="mb-sm font-headline-md text-headline-md text-on-surface">Failed to load projects</h3>
-                <p className="font-body-md text-body-md text-on-surface-variant">{error}</p>
-              </div>
-            ) : loading ? (
-              <div className="flex items-center justify-center py-xl">
-                <div className="h-8 w-8 animate-spin rounded-full border-2 border-outline-variant border-t-primary-fixed-dim" />
-                <span className="ml-md font-body-md text-body-md text-on-surface-variant">Loading workspace…</span>
-              </div>
-            ) : filtered.length === 0 ? (
-              <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-outline-variant/30 p-xl text-center">
-                <MaterialIcon name="folder_open" size={48} className="mb-md text-on-surface-variant/40" />
-                <h3 className="mb-sm font-headline-md text-headline-md text-on-surface">
-                  {search ? "No matching projects" : "No projects yet"}
-                </h3>
-                <p className="mb-lg font-body-md text-body-md text-on-surface-variant">
-                  {search
-                    ? `No projects match "${search}".`
-                    : "Upload documents to create research projects. Each indexed document becomes a project."}
-                </p>
-                {!search && (
-                  <Link
-                    href="/upload"
-                    className="flex items-center gap-sm rounded-lg bg-primary-container px-lg py-md font-label-md text-label-md text-on-primary-container transition-colors hover:bg-primary"
-                  >
-                    <MaterialIcon name="cloud_upload" size={18} /> Upload first document
-                  </Link>
-                )}
-              </div>
-            ) : (
-              <div className="flex flex-1 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container-low">
-                <div className="flex-1 overflow-x-auto">
-                  <table className="w-full min-w-[700px] border-collapse whitespace-nowrap text-left">
-                    <thead>
-                      <tr className="border-b border-outline-variant font-label-md text-label-md text-on-surface-variant">
-                        <th className="px-md py-sm font-medium">Project Name</th>
-                        <th className="px-md py-sm font-medium">Type</th>
-                        <th className="px-md py-sm font-medium">Chunks</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-outline-variant/50 font-body-md text-body-md text-on-surface">
-                      {filtered.map((project) => {
-                        const active = project.id === selectedId;
-                        return (
-                          <tr
-                            key={project.id}
-                            onClick={() => { setSelectedId(project.id); setOpen(true); }}
-                            className={`cursor-pointer transition-colors hover:bg-surface-container-highest ${
-                              active ? "border-l-2 border-l-primary bg-primary/5" : "border-l-2 border-l-transparent"
-                            }`}
-                          >
-                            <td className="px-md py-sm">
-                              <div className="flex items-center gap-sm">
-                                <div className="flex h-6 w-6 items-center justify-center rounded border border-outline-variant bg-surface-bright text-primary">
-                                  <MaterialIcon name={project.icon} size={14} />
-                                </div>
-                                <div>
-                                  <div className={`font-medium ${active ? "text-primary" : "text-on-surface"}`}>
-                                    {project.name}
-                                  </div>
-                                  <div className="font-mono-sm text-[10px] text-on-surface-variant/60">{project.code}</div>
-                                </div>
-                              </div>
-                            </td>
-                            <td className="px-md py-sm capitalize text-on-surface-variant">{project.source_kind}</td>
-                            <td className="px-md py-sm font-mono-sm text-on-surface-variant">{project.chunk_count}</td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-                <div className="flex items-center justify-between border-t border-outline-variant bg-surface-container-high px-md py-sm text-sm text-on-surface-variant">
-                  <span>Showing {filtered.length} of {projects.length} projects</span>
-                </div>
-              </div>
-            )}
+            <div className="flex items-center gap-md">
+              <label className="flex items-center gap-xs text-[14px] text-on-surface-variant">
+                <input
+                  type="checkbox"
+                  checked={showArchived}
+                  onChange={(e) => setShowArchived(e.target.checked)}
+                  className="accent-primary-fixed-dim"
+                />
+                Show archived
+              </label>
+              <button
+                type="button"
+                onClick={() => setCreating((v) => !v)}
+                aria-expanded={creating}
+                className="flex items-center gap-xs rounded-lg bg-primary-fixed-dim px-md py-sm text-[14px] font-semibold text-on-primary-fixed hover:opacity-90"
+              >
+                <MaterialIcon name="add" size={18} />
+                New project
+              </button>
+            </div>
           </div>
+
+          {creating ? (
+            <form
+              className="flex flex-col gap-md rounded-2xl border border-outline-variant/30 bg-surface-container-low p-lg"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void submit();
+              }}
+            >
+              <label className="flex flex-col gap-xs text-[14px] text-on-surface-variant">
+                Name
+                <input
+                  autoFocus
+                  value={name}
+                  maxLength={120}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="Q3 board review"
+                  className="rounded-lg border border-outline-variant/40 bg-surface px-md py-sm text-[15px] text-on-surface focus:border-primary-fixed-dim focus:outline-none"
+                />
+              </label>
+              <label className="flex flex-col gap-xs text-[14px] text-on-surface-variant">
+                What is it for? (optional)
+                <textarea
+                  value={description}
+                  rows={2}
+                  maxLength={2000}
+                  onChange={(e) => setDescription(e.target.value)}
+                  className="resize-none rounded-lg border border-outline-variant/40 bg-surface px-md py-sm text-[15px] text-on-surface focus:border-primary-fixed-dim focus:outline-none"
+                />
+              </label>
+              {formError ? <p role="alert" className="text-[14px] text-error">{formError}</p> : null}
+              <div className="flex gap-sm">
+                <button
+                  type="submit"
+                  disabled={!name.trim() || saving}
+                  className="rounded-lg bg-primary-fixed-dim px-lg py-sm text-[14px] font-semibold text-on-primary-fixed disabled:opacity-50"
+                >
+                  {saving ? "Creating…" : "Create project"}
+                </button>
+                <button type="button" onClick={() => setCreating(false)} className="px-md text-[14px] text-on-surface-variant">
+                  Cancel
+                </button>
+              </div>
+            </form>
+          ) : null}
+
+          {error ? (
+            <div role="alert" className="rounded-2xl border border-error/30 bg-error-container/10 p-lg text-error">
+              {error}{" "}
+              <button type="button" onClick={() => void load()} className="underline">
+                Try again
+              </button>
+            </div>
+          ) : loading ? (
+            <p className="text-on-surface-variant">Loading projects…</p>
+          ) : projects.length === 0 ? (
+            <div className="flex flex-col items-start gap-md rounded-2xl border border-dashed border-outline-variant/40 p-xl">
+              <h3 className="text-[19px] font-semibold text-on-surface">No projects yet</h3>
+              <p className="max-w-xl text-[15px] leading-relaxed text-on-surface-variant">
+                Create a project, add the documents it is about, then research inside it and save the answers worth
+                keeping as findings. A report can be generated from them at any time.
+              </p>
+              <button
+                type="button"
+                onClick={() => setCreating(true)}
+                className="rounded-lg border border-outline-variant px-md py-sm text-[14px] text-primary"
+              >
+                Create your first project
+              </button>
+            </div>
+          ) : (
+            <ul className="grid grid-cols-1 gap-md md:grid-cols-2 xl:grid-cols-3">
+              {projects.map((p) => (
+                <li key={p.id}>
+                  <Link
+                    href={`/projects/${p.id}`}
+                    className="flex h-full flex-col gap-md rounded-2xl border border-outline-variant/30 bg-surface-container-low p-lg transition-colors hover:border-primary-fixed-dim/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary-fixed-dim"
+                  >
+                    <div className="flex items-start justify-between gap-sm">
+                      <h3 className="text-[17px] font-semibold leading-snug text-on-surface">{p.name}</h3>
+                      {p.archived ? (
+                        <span className="shrink-0 rounded-full bg-surface-container-highest px-sm py-[2px] text-[12px] text-on-surface-variant">
+                          Archived
+                        </span>
+                      ) : null}
+                    </div>
+                    {p.description ? (
+                      <p className="line-clamp-2 text-[14px] leading-relaxed text-on-surface-variant">{p.description}</p>
+                    ) : null}
+                    <dl className="mt-auto grid grid-cols-4 gap-sm border-t border-outline-variant/20 pt-md">
+                      {(
+                        [
+                          ["Documents", p.counts.documents],
+                          ["Findings", p.counts.findings],
+                          ["Notes", p.counts.notes],
+                          ["Reports", p.counts.reports]
+                        ] as const
+                      ).map(([label, value]) => (
+                        <div key={label}>
+                          <dt className="text-[12px] text-on-surface-variant/80">{label}</dt>
+                          <dd className="text-[17px] font-semibold text-on-surface">{value}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                    <p className="text-[12px] text-on-surface-variant/70">{updatedText(p.updated_at)}</p>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       </div>
-
-      {/* Detail drawer */}
-      {open && selected ? (
-        <aside className="z-20 hidden w-[380px] flex-shrink-0 flex-col border-l border-outline-variant bg-surface-container xl:flex">
-          <header className="flex items-start justify-between border-b border-outline-variant bg-surface-container-high p-lg">
-            <div>
-              <h3 className="mb-xs font-headline-md text-headline-md font-semibold text-on-surface">
-                {selected.name}
-              </h3>
-              <p className="text-sm text-on-surface-variant">ID: {selected.code}</p>
-            </div>
-            <button
-              type="button"
-              aria-label="Close details"
-              onClick={() => setOpen(false)}
-              className="rounded p-1 text-on-surface-variant transition-colors hover:bg-surface-bright hover:text-on-surface"
-            >
-              <MaterialIcon name="close" />
-            </button>
-          </header>
-          <div className="flex-1 space-y-xl overflow-y-auto p-lg">
-            <div className="grid grid-cols-2 gap-sm">
-              <Link
-                href={`/research`}
-                className="flex items-center justify-center gap-xs rounded bg-primary py-2 font-label-md font-medium text-on-primary transition-colors hover:bg-primary-fixed"
-              >
-                <MaterialIcon name="science" size={18} /> Open Research
-              </Link>
-              <Link
-                href={`/documents`}
-                className="flex items-center justify-center gap-xs rounded border border-outline-variant bg-surface-bright py-2 font-label-md font-medium text-on-surface transition-colors hover:bg-surface-container-highest"
-              >
-                <MaterialIcon name="description" size={18} /> View Docs
-              </Link>
-            </div>
-            <div>
-              <h4 className="mb-md border-b border-outline-variant/50 pb-xs font-label-md text-label-md uppercase tracking-wider text-on-surface-variant">
-                Metadata
-              </h4>
-              <div className="space-y-sm text-sm">
-                <div className="flex justify-between">
-                  <span className="text-on-surface-variant">Document ID</span>
-                  <span className="font-mono-sm text-on-surface">{selected.id.slice(0, 12)}…</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-on-surface-variant">Type</span>
-                  <span className="font-mono-sm capitalize text-on-surface">{selected.source_kind}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-on-surface-variant">Chunks indexed</span>
-                  <span className="font-mono-sm text-on-surface">{selected.chunk_count}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </aside>
-      ) : null}
     </main>
   );
 }

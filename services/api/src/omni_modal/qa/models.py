@@ -81,6 +81,8 @@ class QueryRequest:
     history: tuple[tuple[str, str], ...] = ()
     # Standalone rewrite of a follow-up question, used for retrieval only.
     search_query: str | None = None
+    # Limit retrieval to these documents (a project). None means every document.
+    document_ids: tuple[str, ...] | None = None
 
     @property
     def retrieval_text(self) -> str:

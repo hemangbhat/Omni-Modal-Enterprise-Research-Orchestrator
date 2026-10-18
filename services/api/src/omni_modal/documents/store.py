@@ -67,6 +67,8 @@ class DocumentRecord:
     created_at: float = 0.0
     updated_at: float = 0.0
     processed_at: float | None = None
+    # Archived documents are left out of research and the default list.
+    archived_at: float | None = None
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -195,7 +197,7 @@ _DOC_COLUMNS = (
     "d.source_type::text, COALESCE(d.content_type, ''), COALESCE(d.size_bytes, 0), "
     "COALESCE(d.content_hash, ''), COALESCE(d.storage_key, ''), d.status::text, d.error_message, "
     "(SELECT count(*) FROM document_chunks c WHERE c.document_id = d.id), "
-    "d.created_at, d.updated_at, d.processed_at"
+    "d.created_at, d.updated_at, d.processed_at, d.archived_at"
 )
 _JOB_COLUMNS = "id::text, tenant_id, document_id::text, stage, attempts, error_message, created_at, updated_at"
 
@@ -215,6 +217,7 @@ class PostgresDocumentStore:
             source_kind=row[5], content_type=row[6], size_bytes=int(row[7]), content_hash=row[8],
             storage_key=row[9], status=row[10], error_message=row[11], chunk_count=int(row[12]),
             created_at=_ts(row[13]) or 0.0, updated_at=_ts(row[14]) or 0.0, processed_at=_ts(row[15]),
+            archived_at=_ts(row[16]),
         )
 
     @staticmethod
@@ -276,7 +279,7 @@ class PostgresDocumentStore:
             )
             return [self._doc(r) for r in cur.fetchall()]
 
-    _UPDATABLE = {"status", "error_message", "processed_at", "title"}
+    _UPDATABLE = {"status", "error_message", "processed_at", "title", "archived_at"}
 
     def update_document(self, tenant_id: str, document_id: str, **fields) -> DocumentRecord:
         unknown = set(fields) - self._UPDATABLE - {"chunk_count"}
@@ -288,8 +291,8 @@ class PostgresDocumentStore:
             if name == "status":
                 sets.append("status = %s::document_status")
                 params.append(value)
-            elif name == "processed_at":
-                sets.append("processed_at = CASE WHEN %s THEN now() ELSE NULL END")
+            elif name in ("processed_at", "archived_at"):
+                sets.append(f"{name} = CASE WHEN %s THEN now() ELSE NULL END")
                 params.append(value is not None)
             else:
                 sets.append(f"{name} = %s")

@@ -68,6 +68,7 @@ class QueryCache:
         tenant_id: str,
         top_k: int,
         min_similarity: float,
+        document_ids=None,
     ) -> CacheKey:
         """Return the SHA-256 hex digest of the canonical key tuple.
 
@@ -75,8 +76,10 @@ class QueryCache:
         trivially equivalent queries share a cache entry.
         """
         normalized = question.lower().strip()
+        # A project-scoped answer must never be served to an unscoped query, or the reverse.
+        scope = None if document_ids is None else sorted(set(document_ids))
         raw = json.dumps(
-            [normalized, tenant_id, top_k, min_similarity],
+            [normalized, tenant_id, top_k, min_similarity, scope],
             separators=(",", ":"),
             sort_keys=True,
         ).encode()

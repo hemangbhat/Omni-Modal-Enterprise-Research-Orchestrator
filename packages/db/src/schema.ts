@@ -16,6 +16,7 @@ import {
   varchar
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
+import type { AnyPgColumn } from "drizzle-orm/pg-core";
 
 export const documentStatus = pgEnum("document_status", [
   "uploaded",
@@ -144,7 +145,8 @@ export const documents = pgTable(
     contentHash: varchar("content_hash", { length: 64 }),
     storageKey: text("storage_key"),
     uploadedBy: text("uploaded_by"),
-    errorMessage: text("error_message")
+    errorMessage: text("error_message"),
+    archivedAt: timestamp("archived_at", { withTimezone: true })
   },
   (table) => ({
     tenantIdx: index("documents_tenant_idx").on(table.tenantId),
@@ -239,6 +241,8 @@ export const extractedEntities = pgTable(
     value: text("value").notNull(),
     normalizedValue: text("normalized_value"),
     confidence: integer("confidence"),
+    // The extractor's own label (decision, risk, action_item, ...); `type` is 'other' for these rows.
+    label: text("label"),
     metadata: jsonb("metadata").notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
   },
@@ -320,6 +324,7 @@ export const researchSessions = pgTable(
     tenantId: text("tenant_id").notNull(),
     userId: text("user_id").notNull(),
     kind: text("kind").notNull().default("research"),
+    projectId: text("project_id").references((): AnyPgColumn => projects.id, { onDelete: "set null" }),
     title: text("title").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
@@ -366,3 +371,74 @@ export type ExtractedEntity = typeof extractedEntities.$inferSelect;
 export type NewExtractedEntity = typeof extractedEntities.$inferInsert;
 export type AuditLog = typeof auditLogs.$inferSelect;
 export type NewAuditLog = typeof auditLogs.$inferInsert;
+
+export const projects = pgTable(
+  "projects",
+  {
+    id: text("id").primaryKey(),
+    tenantId: varchar("tenant_id", { length: 128 }).notNull(),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    createdBy: text("created_by").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    archivedAt: timestamp("archived_at", { withTimezone: true })
+  },
+  (table) => ({ tenantIdx: index("projects_tenant_idx").on(table.tenantId, table.updatedAt) })
+);
+
+export const projectDocuments = pgTable(
+  "project_documents",
+  {
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    documentId: uuid("document_id")
+      .notNull()
+      .references(() => documents.id, { onDelete: "cascade" }),
+    tenantId: varchar("tenant_id", { length: 128 }).notNull(),
+    addedBy: text("added_by").notNull(),
+    addedAt: timestamp("added_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => ({ pk: primaryKey({ columns: [table.projectId, table.documentId] }) })
+);
+
+export const projectItems = pgTable("project_items", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id")
+    .notNull()
+    .references(() => projects.id, { onDelete: "cascade" }),
+  tenantId: varchar("tenant_id", { length: 128 }).notNull(),
+  kind: text("kind").notNull(),
+  title: text("title").notNull(),
+  body: text("body").notNull().default(""),
+  citations: jsonb("citations").notNull().default([]),
+  sourceSessionId: text("source_session_id"),
+  createdBy: text("created_by").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+});
+
+export const projectReports = pgTable("project_reports", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").references(() => projects.id, { onDelete: "cascade" }),
+  tenantId: varchar("tenant_id", { length: 128 }).notNull(),
+  source: text("source").notNull(),
+  sourceSessionId: text("source_session_id"),
+  title: text("title").notNull(),
+  markdown: text("markdown").notNull(),
+  createdBy: text("created_by").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+});
+
+export const projectActivity = pgTable("project_activity", {
+  id: bigint("id", { mode: "number" }).primaryKey(),
+  projectId: text("project_id")
+    .notNull()
+    .references(() => projects.id, { onDelete: "cascade" }),
+  tenantId: varchar("tenant_id", { length: 128 }).notNull(),
+  actor: text("actor").notNull(),
+  action: text("action").notNull(),
+  detail: jsonb("detail").notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+});

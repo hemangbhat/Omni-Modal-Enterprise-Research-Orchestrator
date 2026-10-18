@@ -30,6 +30,8 @@ export type SessionSummary = {
   title: string;
   created_at: number;
   updated_at: number;
+  /** The project whose documents this session searches, if any. */
+  project_id?: string | null;
 };
 
 export type SessionMessage = {
@@ -52,6 +54,7 @@ export type ResearchDone = {
   citations: Citation[];
   session_id: string;
   search_query: string | null;
+  project_id?: string | null;
 };
 
 export type AssistantDone = {
@@ -154,9 +157,12 @@ async function stream<Done>(path: string, body: unknown, handlers: StreamHandler
 export function streamResearch(
   question: string,
   sessionId: string | null,
-  handlers: StreamHandlers<ResearchDone>
+  handlers: StreamHandlers<ResearchDone>,
+  projectId?: string | null
 ): Promise<void> {
-  return stream("/query/stream", { question, ...(sessionId ? { session_id: sessionId } : {}) }, handlers);
+  // A new session can be limited to a project; an existing one keeps its own scope.
+  const scope = sessionId ? { session_id: sessionId } : projectId ? { project_id: projectId } : {};
+  return stream("/query/stream", { question, ...scope }, handlers);
 }
 
 export function streamAssistant(

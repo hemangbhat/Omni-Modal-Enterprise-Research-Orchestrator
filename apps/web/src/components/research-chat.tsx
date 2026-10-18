@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { AnswerMarkdown } from "@/components/answer-markdown";
 import { EvidenceCard } from "@/components/evidence-card";
 import { MaterialIcon } from "@/components/material-icon";
@@ -105,16 +106,17 @@ export function ResearchChat() {
   }, [refreshSessions]);
 
   // Links from elsewhere: /research?project=ID starts research in a project,
-  // /research?session=ID opens a saved session.
+  // /research?session=ID opens a saved session. Also applies when a link is
+  // followed while already on this page.
+  const searchParams = useSearchParams();
+  const sessionParam = searchParams?.get("session") ?? null;
+  const projectParam = searchParams?.get("project") ?? null;
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const session = params.get("session");
-    const project = params.get("project");
-    if (session) void openSession(session);
-    else if (project) setProjectId(project);
-    // Runs once on arrival.
+    if (sessionParam) void openSession(sessionParam);
+    else if (projectParam) setProjectId(projectParam);
+    // Reacts to the address only, not to openSession's identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [sessionParam, projectParam]);
 
   useEffect(() => {
     threadEnd.current?.scrollIntoView({ block: "end", behavior: "smooth" });
@@ -317,6 +319,7 @@ export function ResearchChat() {
               type="button"
               onClick={() => void makeReport()}
               disabled={busy}
+              title={projectId ? "The report is saved to the project, so everyone in it can see it." : "Make a report from this session."}
               className="hidden shrink-0 items-center gap-xs rounded-lg border border-outline-variant/40 px-sm py-xs text-[13px] text-on-surface hover:bg-surface-container disabled:opacity-50 sm:flex"
             >
               <MaterialIcon name="description" size={16} /> Report

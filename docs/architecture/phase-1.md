@@ -1,3 +1,4 @@
+
 # Phase 1 Architecture
 
 ## Scope

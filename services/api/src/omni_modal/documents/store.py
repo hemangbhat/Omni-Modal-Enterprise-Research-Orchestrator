@@ -170,6 +170,15 @@ class InMemoryDocumentStore:
             docs = [d for d in self._docs.values() if d.tenant_id == tenant_id]
         return sorted(docs, key=lambda d: d.created_at, reverse=True)
 
+    def status_counts(self, tenant_id: str) -> dict[str, int]:
+        with self._lock:
+            out: dict[str, int] = {}
+            for d in self._docs.values():
+                if d.tenant_id == tenant_id:
+                    key = "archived" if d.archived_at is not None else d.status
+                    out[key] = out.get(key, 0) + 1
+            return out
+
     def query_documents(self, tenant_id: str, q: DocumentQuery) -> tuple[list[DocumentRecord], int]:
         with self._lock:
             docs = [d for d in self._docs.values() if d.tenant_id == tenant_id and _matches(d, q)]
@@ -334,6 +343,15 @@ class PostgresDocumentStore:
         "title": "lower(d.title) ASC, d.id",
         "size": "COALESCE(d.size_bytes, 0) DESC, d.id",
     }
+
+    def status_counts(self, tenant_id: str) -> dict[str, int]:
+        with self._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT CASE WHEN archived_at IS NOT NULL THEN 'archived' ELSE status::text END, count(*)
+                   FROM documents WHERE tenant_id = %s GROUP BY 1""",
+                (tenant_id,),
+            )
+            return {row[0]: int(row[1]) for row in cur.fetchall()}
 
     def query_documents(self, tenant_id: str, q: DocumentQuery) -> tuple[list[DocumentRecord], int]:
         where = ["d.tenant_id = %s", "(d.archived_at IS NOT NULL) = %s"]

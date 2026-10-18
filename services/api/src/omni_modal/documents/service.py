@@ -436,6 +436,11 @@ class DocumentService:
             tenant_id, DocumentQuery(**{**query.__dict__, "page": page, "page_size": page_size, "text": query.text[:200]})
         )
 
+    def status_counts(self, tenant_id: str) -> dict[str, int]:
+        """Documents per status (archived ones counted separately), in one query."""
+        counts = self._store.status_counts(tenant_id)
+        return {key: counts.get(key, 0) for key in ("ready", "processing", "uploaded", "failed", "archived")}
+
     def archive(self, tenant_id: str, user_id: str, roles, document_id: str) -> DocumentRecord:
         """Hide a document from research and the library until restored."""
         doc = self._store.get_document(tenant_id, document_id)

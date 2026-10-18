@@ -1,5 +1,6 @@
 "use client";
 
+import { FailedJobs } from "@/components/failed-jobs";
 import { useEffect, useState } from "react";
 import { MaterialIcon } from "@/components/material-icon";
 import { TopBar } from "@/components/top-bar";
@@ -143,6 +144,7 @@ export default function AdminPage() {
                 </div>
               </div>
             )}
+            {!forbidden ? <FailedJobs /> : null}
           </div>
         </div>
       </div>

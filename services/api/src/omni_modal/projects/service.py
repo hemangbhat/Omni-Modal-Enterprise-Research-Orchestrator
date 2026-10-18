@@ -65,21 +65,16 @@ class ProjectService:
         return self._store.get_project(tenant_id, project_id)
 
     def list(self, tenant_id: str, *, include_archived: bool = False) -> list[dict]:
-        out = []
-        for project in self._store.list_projects(tenant_id):
-            if project.archived_at is not None and not include_archived:
-                continue
-            items = self._store.list_items(tenant_id, project.id)
-            out.append({
-                "project": project,
-                "counts": {
-                    "documents": len(self._store.document_ids(tenant_id, project.id)),
-                    "findings": sum(1 for i in items if i.kind == "finding"),
-                    "notes": sum(1 for i in items if i.kind == "note"),
-                    "reports": len(self._store.list_reports(tenant_id, project.id)),
-                },
-            })
-        return out
+        """Projects with their counts, in one store call."""
+        return [
+            {"project": project, "counts": counts}
+            for project, counts in self._store.list_with_counts(tenant_id)
+            if include_archived or project.archived_at is None
+        ]
+
+    def projects(self, tenant_id: str, *, include_archived: bool = False) -> list[Project]:
+        """Projects without counts (cheap: names for lists, search, the dashboard)."""
+        return [p for p in self._store.list_projects(tenant_id) if include_archived or p.archived_at is None]
 
     def _writable(self, tenant_id: str, project_id: str) -> Project:
         project = self._store.get_project(tenant_id, project_id)
@@ -285,6 +280,8 @@ class ProjectService:
                 self._store.get_project(tenant_id, project_id)
             except ProjectNotFound:
                 project_id = None
+        if project_id is not None and self._store.get_project(tenant_id, project_id).archived_at is not None:
+            raise InvalidState("This session's project is archived. Restore it to add reports.")
         markdown = reports.session_report(detail.session.title, detail.messages, now=time.time())
         report = self._store.add_report(ProjectReport(
             id=new_id(), project_id=project_id, tenant_id=tenant_id, source="session",

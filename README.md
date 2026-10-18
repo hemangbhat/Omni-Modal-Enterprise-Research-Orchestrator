@@ -12,7 +12,7 @@ A multi-tenant enterprise research platform that ingests PDF and audio documents
 - **Observability** — Sentry distributed tracing across frontend and backend, property-based tests for correctness
 - **Enterprise security** — JWT authentication, RBAC, document-level access control, PII scrubbing, rate limiting, content redaction before external delegation
 - **Performance** — async ingestion queue, connection pooling, query result caching, batch embedding writes
-- **Test quality** — 676 backend tests (unit, HTTP integration, Hypothesis property-based) and 120 frontend tests (API clients and screen-level tests of sign-in, two-step sign-in, password reset, research and the assistant); CI is configured to run both suites
+- **Test quality** — 721 backend tests (unit, HTTP integration, Hypothesis property-based) and 130 frontend tests (API clients and screen-level tests of sign-in, two-step sign-in, password reset, research, the assistant, projects, the dashboard and the document library); CI is configured to run both suites
 - **Works locally without a database** — a Postgres-free in-memory path wires ingestion → persistence → retrieval end-to-end so the demo runs out of the box (with a deterministic, non-semantic embedder)
 
 ---
@@ -224,6 +224,29 @@ Audio is transcribed by local Whisper when it is installed, otherwise by Groq's 
 
 For browser uploads straight to S3, the bucket needs a CORS rule allowing `PUT` from the frontend's origin with the `Content-Type` header.
 
+### Projects, reports and workspace endpoints
+
+| Endpoint | What it does |
+|---|---|
+| `GET/POST /projects`, `GET/PATCH /projects/{id}`, `POST /projects/{id}/archive`, `/restore` | Projects shared within a tenant. Researchers and admins change them; archiving is for the creator or an admin; an archived project is read-only |
+| `POST /projects/{id}/documents`, `DELETE /projects/{id}/documents/{doc}` | Link documents (only the same tenant's) to a project |
+| `POST/PATCH/DELETE /projects/{id}/items` | Findings (saved from research answers with their citations) and notes. Author or admin edits |
+| `GET /projects/{id}/search` | Document titles, findings, notes and report titles within the project |
+| `POST /projects/{id}/reports`, `POST /research/sessions/{id}/report`, `GET /reports/{id}`, `/download` | Compiled Markdown reports (see below) |
+| `PUT /research/sessions/{id}/project` | Put a session in a project, which limits its research to that project's documents |
+| `GET /documents?q=&status=&kind=&project_id=&mine=&sort=&page=` | The library: search titles and file names, filter, sort, paginate. Archived documents are left out |
+| `POST /documents/{id}/archive`, `/restore`, `GET /archives` | Archived documents keep their file and index but are left out of research and the default list |
+| `GET /dashboard` | Counts and recent activity read from stored records |
+| `GET /search?q=` | Document titles and file names, project names and descriptions, and the caller's own research titles |
+| `GET /billing/invoices` | Stripe invoices when Stripe is configured; otherwise says history is not available |
+| `GET /admin/ingestion/failures`, `POST .../{doc}/retry` | Admins see failed processing with its reason and retry it |
+
+**Reports are compiled, not written by a model.** A project report lists the saved findings (their `[n]` markers renumbered into one source list for the whole report), notes, and the decisions, risks, action items, owners and deadlines found in the project's documents. A session report lists each question and answer. Every sentence comes from saved material.
+
+**Scoped research.** A session in a project passes the project's document ids to retrieval (`QueryRequest.document_ids`, a SQL `ANY` filter in pgvector and a set filter in memory). The answer cache key includes the scope, so a project answer is never served to an unscoped question or the reverse.
+
+**Readiness** (`/health/ready`) also checks object storage (failure means not ready) and reports the model provider's state; without a working model, answers fall back to extracts, so that alone does not mark the service not ready. Stripe webhooks are refused unless `STRIPE_WEBHOOK_SECRET` is set (or `OMERO_ALLOW_UNVERIFIED_WEBHOOKS=true` in development).
+
 ### Research and assistant endpoints
 
 | Endpoint | What it does |
@@ -245,7 +268,7 @@ Model defaults: `GROQ_MODEL=openai/gpt-oss-120b`, `GEMINI_MODEL=gemini-flash-lat
 ### Tests
 
 ```bash
-# Backend unit, property-based and HTTP integration tests (676 tests).
+# Backend unit, property-based and HTTP integration tests (721 tests).
 # The suite never reads your .env, so it does not use your real keys or database.
 cd services/api && python -m pytest tests
 
@@ -525,7 +548,7 @@ Internal document chunks must never leave the tenant security boundary. The `Red
 - **Frontend wired to the backend**: `/upload` hashes each file in the browser, sends it straight to storage and shows every processing stage live; `/documents` downloads, deletes and reprocesses; `/research` streams answers from `/query/stream` and renders checked citations
 - **End-to-end local path (no DB)**: upload → `DocumentService` job → `InMemoryChunkPersistence` → `InMemoryVectorStore` → `InMemoryChunkRetriever` returns ranked cosine-similarity results
 - Python HTTP backend: ingestion pipeline, vector retrieval, MCP tool server, ADK workflow orchestration
-- **All pages wired to live backend data**: Dashboard (`/health`), Documents (`/documents` + `/entities`), Projects (`/projects`), Archives (`/archives`), Settings (`/health`)
+- **All pages wired to live backend data**: Dashboard (`/dashboard`), Documents (`/documents` + `/entities`), Projects (`/projects`), Archives (`/archives`), Pricing (`/plans`), Billing history (`/billing/invoices`), Admin failures (`/admin/ingestion/failures`)
 - **Startup log**: backend prints active path (in-memory vs pgvector), embedding backend, Whisper model, NER model, and Sentry status on startup
 - pgvector schema with HNSW index and covering index (SQL migration files)
 - Sentry distributed tracing: frontend→backend via `sentry-trace`/`baggage` headers, child spans, PII scrubbing
@@ -569,10 +592,9 @@ Internal document chunks must never leave the tenant security boundary. The `Red
 Audited on 2026-10-11 against the target product description. These are not built yet; the plan and order are in `docs/superpowers/specs/2026-10-11-omero-completion-design.md`.
 
 - **Research:** no full-text or hybrid search and no reranker yet; they are planned together with a measured retrieval evaluation, so they are only switched on if they help.
-- **Projects and archives:** there is no projects table and no archive action. The Projects and Archives pages each list one row per indexed document.
 - **External research:** the delegation client is generic and off unless an endpoint is configured; no provider is wired.
-- **Billing:** no pricing page and no billing history view.
-- **Operations:** no admin view of failed ingestion jobs; the readiness probe does not check storage or the model provider; backup and recovery are not documented.
+- **Plans:** the plan table defines feature flags (SSO, audit export, priority ingest, external delegation) that nothing enforces or implements yet, so the pricing and billing pages list only the enforced limits.
+- **Operations:** backup and recovery are not documented.
 - **Deployment:** the Render free tier runs the hashing embedder, which is not semantic.
 - **Frontend:** no browser end-to-end test. `npm run lint` is broken (`next lint` was removed in Next.js 16).
 - **Fresh databases:** `0002_perf.sql` contains `ALTER DATABASE current_database() SET ...`, which does not look like valid SQL, and the live database was missing that file's covering index until it was added by hand on 2026-10-11. Building a new database from the migration files alone has not been tested and may stop at 0002.

@@ -141,6 +141,27 @@ class ProjectsApiTests(unittest.TestCase):
         self.assertEqual(self.client.post("/projects", json={"name": "x"}, headers=auditor).status_code, 403)
         self.assertEqual(self.client.post(f"/projects/{pid}/items", headers=auditor,
                                           json={"kind": "note", "title": "x"}).status_code, 403)
+        self.assertEqual(self.client.put("/research/sessions/any/project", headers=auditor,
+                                         json={"project_id": pid}).status_code, 403)
+        self.assertEqual(self.client.post("/research/sessions/any/report", headers=auditor).status_code, 403)
+
+    def test_report_download_name_with_non_ascii_title(self) -> None:
+        auth = self._user("proj-unicode@example.com")
+        pid = self._project(auth, name="Résumé review — Q3")
+        report = self.client.post(f"/projects/{pid}/reports", headers=auth).json()
+        download = self.client.get(f"/reports/{report['id']}/download", headers=auth)
+        self.assertEqual(download.status_code, 200)
+        header = download.headers["content-disposition"]
+        self.assertIn("filename*=UTF-8''R%C3%A9sum%C3%A9%20review%20%E2%80%94%20Q3%20report.md", header)
+
+    def test_dashboard_counts_and_readiness_does_not_call_model(self) -> None:
+        auth = self._user("proj-dash@example.com")
+        self._upload(auth, "Dashboard document text.", "dash.pdf")
+        self._project(auth, name="Dash project")
+        body = self.client.get("/dashboard", headers=auth).json()
+        self.assertEqual(body["projects"], 1)
+        ready = self.client.get("/health/ready")
+        self.assertIn("model_provider", ready.json().get("checks", {}))
 
     def test_other_tenant_cannot_reach_project_or_link_its_documents(self) -> None:
         owner = self._user("proj-owner@example.com")

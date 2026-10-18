@@ -244,6 +244,10 @@ export default function SignInPage() {
                 New here?{" "}
                 <Link href="/sign-up" className="text-primary-fixed-dim underline hover:text-primary-fixed">
                   Create an account
+                </Link>{" "}
+                or{" "}
+                <Link href="/pricing" className="text-primary-fixed-dim underline hover:text-primary-fixed">
+                  see pricing
                 </Link>
               </p>
             </form>

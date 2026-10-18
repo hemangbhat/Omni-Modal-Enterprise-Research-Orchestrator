@@ -5,7 +5,8 @@ import { AnswerMarkdown, parseBlocks } from "@/components/answer-markdown";
 const push = vi.fn();
 vi.mock("next/navigation", () => ({
   usePathname: () => "/documents",
-  useRouter: () => ({ push, replace: vi.fn() })
+  useRouter: () => ({ push, replace: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(window.location.search)
 }));
 
 import { AssistantPanel } from "@/components/assistant-panel";
@@ -35,6 +36,12 @@ describe("AnswerMarkdown", () => {
     expect(onCite).toHaveBeenCalledWith(2);
     expect(screen.queryByRole("button", { name: "Show source 9" })).toBeNull();
     expect(screen.getByText(/\[9\]/)).toBeTruthy();
+  });
+
+  it("renders bold and italic", () => {
+    const { container } = render(<AnswerMarkdown markdown="A **bold** and *italic* word." citationCount={0} />);
+    expect(container.querySelector("strong")?.textContent).toBe("bold");
+    expect(container.querySelector("em")?.textContent).toBe("italic");
   });
 
   it("renders text, never HTML", () => {

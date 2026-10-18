@@ -40,6 +40,21 @@ class EntityExtractionTest(unittest.TestCase):
         self.assertEqual(payload["schema_version"], "enterprise_entities.v1")
         self.assertIsInstance(payload["entities"], list)
 
+    def test_decisions_risks_and_actions_are_whole_sentences(self) -> None:
+        text = (
+            "Revenue grew. The board approved a budget of 2.4 million dollars. "
+            "The board flagged hiring in the security team as the main open risk. "
+            "Action item: Priya Shah to present a hiring plan by November 15."
+        )
+        output = RuleBasedEnterpriseEntityExtractor().extract(tenant_id="t", document_id="d", text=text)
+        by_label = {}
+        for e in output.entities:
+            by_label.setdefault(e.label.value, []).append(e.text)
+        self.assertEqual(by_label["decision"], ["The board approved a budget of 2.4 million dollars."])
+        self.assertEqual(by_label["risk"], ["The board flagged hiring in the security team as the main open risk."])
+        self.assertEqual(by_label["action_item"], ["Action item: Priya Shah to present a hiring plan by November 15."])
+        self.assertIn("by November 15", by_label["deadline"])
+
     def test_output_maps_to_database_entity_records(self) -> None:
         text = "Decision: approved FY27 ARR goal of 20%."
         output = RuleBasedEnterpriseEntityExtractor().extract(

@@ -40,3 +40,17 @@ New package `omni_modal/projects/` with an in-memory and a Postgres store (selec
 2. Scoped research never returns chunks outside the project, including through the cache.
 3. Archived documents never appear in research answers.
 4. Report content comes only from saved findings, answers and entities.
+
+## Review outcome (2026-10-18)
+
+An independent review of parts A and B found these, all fixed with tests (`test_m3_review_fixes.py`, `test_projects_api.py`):
+
+- Citation runs like `[1][2]` were only partly renumbered; markers are now read as one group in answers and reports.
+- Report text from users or the model could add headings (a fake "Sources" list), HTML or remote images; it is now flattened or escaped.
+- Entity values could swallow whole unpunctuated paragraphs; spans stop at line breaks and are capped at 300 characters. Owner values keep decimals.
+- An empty item edit crashed in Postgres; the Redis worker saved entities to memory only.
+- Report downloads failed for non-ASCII titles; the header now carries an ASCII fallback and the exact UTF-8 name.
+- The library, dashboard and search ran one query per project; project counts and document status counts are now single queries.
+- The readiness probe called the model provider; it now reports the last known state and refreshes it in the background at most every 5 minutes.
+- Auditors could attach sessions to projects and write session reports into them; both need project-manage rights, and archived projects refuse new reports.
+- Search and dashboard links did nothing when already on the target page, and a slow Documents response could replace newer results; pages now follow the address and only the newest request updates the list.

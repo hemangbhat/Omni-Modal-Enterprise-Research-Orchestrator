@@ -65,7 +65,10 @@ def _build_pipeline():
             "DATABASE_URL not set — worker persists to an in-memory store that "
             "is NOT shared with the web tier. Set DATABASE_URL for real ingestion."
         )
-    return pipeline, EntityExtractionService()
+    from omni_modal.entity_extraction.records import select_entity_store
+
+    # Same entity store as the web tier, so project insights see these documents.
+    return pipeline, EntityExtractionService(store=select_entity_store())
 
 
 def main() -> int:

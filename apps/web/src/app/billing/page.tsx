@@ -1,5 +1,6 @@
 "use client";
 
+import { BillingHistory } from "@/components/billing-history";
 import { useEffect, useState } from "react";
 import { MaterialIcon } from "@/components/material-icon";
 import { TopBar } from "@/components/top-bar";
@@ -11,14 +12,6 @@ import {
   startCheckout,
   type Plan
 } from "@/lib/saas-api";
-
-const FEATURE_LABELS: Record<string, string> = {
-  api_access: "API access",
-  external_delegation: "External AI delegation",
-  audit_export: "Audit log export",
-  priority_ingest: "Priority ingestion",
-  sso: "SSO / SAML"
-};
 
 function priceLabel(plan: Plan): string {
   if (plan.id === "enterprise") return "Custom";
@@ -222,9 +215,7 @@ export default function BillingPage() {
                         <PlanLine text={limitText(plan.monthly_upload_limit, "uploads / mo")} />
                         <PlanLine text={limitText(plan.max_workspaces, "workspaces")} />
                         <PlanLine text={limitText(plan.max_members, "team members")} />
-                        {plan.features.map((f) => (
-                          <PlanLine key={f} text={FEATURE_LABELS[f] ?? f} />
-                        ))}
+                        {/* Only limits the API enforces are listed; plan "features" are not built yet. */}
                       </ul>
 
                       <button
@@ -252,6 +243,7 @@ export default function BillingPage() {
                 })}
               </div>
             )}
+            <BillingHistory />
           </div>
         </div>
       </div>

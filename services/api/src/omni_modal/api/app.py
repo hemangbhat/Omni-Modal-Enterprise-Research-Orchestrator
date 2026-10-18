@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import tempfile
+import threading
 import json
 import os
 import time
@@ -48,7 +49,7 @@ from omni_modal.qa.in_memory_store import (
     InMemoryVectorStore,
 )
 from omni_modal.saas import get_saas_service
-from omni_modal.saas.adapters.storage import safe_download_name
+from omni_modal.saas.adapters.storage import content_disposition, safe_download_name
 from omni_modal.saas.plans import PLANS, PlanLimitExceeded
 from omni_modal.security.accounts import AccountError, get_account_service
 from omni_modal.security.auth import AuthError, JwtClaims, _make_jwt, jwt_secret_from_env, verify_jwt
@@ -349,22 +350,30 @@ _MODEL_STATUS_TTL = 300.0
 _model_status_cache: dict[str, object] = {"at": 0.0, "value": ""}
 
 
-def _model_provider_status() -> str:
-    """Whether the configured LLM provider answers, checked at most every 5 minutes."""
-    now = time.time()
-    if now - float(_model_status_cache["at"]) < _MODEL_STATUS_TTL and _model_status_cache["value"]:
-        return str(_model_status_cache["value"])
+_model_status_lock = threading.Lock()
+
+
+def _refresh_model_status() -> None:
     client = select_chat_client()
-    if client is None:
-        value = "not configured (answers use extracts)"
-    else:
-        try:
-            client.complete("Reply with OK.", [{"role": "user", "content": "OK?"}], max_tokens=5)
-            value = f"ok ({client.name})"
-        except Exception as exc:  # noqa: BLE001
-            value = f"error ({client.name}): {type(exc).__name__}; answers fall back to extracts"
-    _model_status_cache.update(at=now, value=value)
-    return value
+    try:
+        client.complete("Reply with OK.", [{"role": "user", "content": "OK?"}], max_tokens=5)
+        value = "ok"
+    except Exception:  # noqa: BLE001
+        value = "unreachable (answers fall back to extracts)"
+    _model_status_cache.update(at=time.time(), value=value, refreshing=False)
+
+
+def _model_provider_status() -> str:
+    """The model provider's last known state. The probe itself never waits on the
+    provider: a stale value is refreshed by one background thread at most every 5 minutes."""
+    if select_chat_client() is None:
+        return "not configured (answers use extracts)"
+    with _model_status_lock:
+        stale = time.time() - float(_model_status_cache["at"]) >= _MODEL_STATUS_TTL
+        if stale and not _model_status_cache.get("refreshing"):
+            _model_status_cache["refreshing"] = True
+            threading.Thread(target=_refresh_model_status, daemon=True, name="ModelStatus").start()
+    return str(_model_status_cache["value"] or "checking")
 
 
 def _document_searchable(tenant_id: str, document_id: str) -> bool:
@@ -556,7 +565,7 @@ def create_app() -> FastAPI:
 
         # The model provider is optional (answers fall back to extracts without it),
         # so its state is reported but never makes the service "not ready".
-        checks["model_provider"] = await run_in_threadpool(_model_provider_status)
+        checks["model_provider"] = _model_provider_status()
 
         body = {"status": "ready" if ok else "not_ready", "checks": checks}
         return JSONResponse(body, status_code=200 if ok else 503)
@@ -1312,8 +1321,7 @@ def create_app() -> FastAPI:
             archived=archived, document_ids=frozenset(scope) if scope is not None else None,
             sort=sort, page=page, page_size=page_size,
         ))
-        names = {p["project"].id: p["project"].name
-                 for p in state.projects.list(claims.tenant_id, include_archived=True)}
+        names = {p.id: p.name for p in state.projects.projects(claims.tenant_id, include_archived=True)}
         memberships = state.projects.projects_for_documents(claims.tenant_id, [d.id for d in docs])
         items = [
             {**d.to_dict(), "projects": [{"id": pid, "name": names.get(pid, "")} for pid in memberships.get(d.id, [])]}
@@ -1447,13 +1455,13 @@ def create_app() -> FastAPI:
 
     @app.post("/research/sessions/{session_id}/report", status_code=201, tags=["projects"])
     def create_session_report(session_id: str,
-                              claims: JwtClaims = Depends(require_roles("/research/sessions/"))) -> dict:
+                              claims: JwtClaims = Depends(require_roles("/projects/manage"))) -> dict:
         return _projects_call(state.projects.report_for_session, claims.tenant_id, claims.user_id,
                               session_id).to_dict()
 
     @app.put("/research/sessions/{session_id}/project", tags=["projects"])
     def set_session_project(session_id: str, body: SessionProjectRequest,
-                            claims: JwtClaims = Depends(require_roles("/research/sessions/"))) -> dict:
+                            claims: JwtClaims = Depends(require_roles("/projects/manage"))) -> dict:
         return _projects_call(state.projects.link_session, claims.tenant_id, claims.user_id,
                               body.project_id, session_id).to_dict()
 
@@ -1469,9 +1477,8 @@ def create_app() -> FastAPI:
     @app.get("/reports/{report_id}/download", tags=["projects"])
     def download_report(report_id: str, claims: JwtClaims = Depends(require_roles("/projects"))):
         report = _projects_call(state.projects.get_report, claims.tenant_id, claims.user_id, report_id)
-        name = safe_download_name(f"{report.title}.md")
         return Response(report.markdown, media_type="text/markdown; charset=utf-8",
-                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
+                        headers={"Content-Disposition": content_disposition(f"{report.title}.md")})
 
     @app.get("/archives", tags=["documents"])
     def archives(q: str = "", kind: str | None = None, sort: str = "newest", page: int = 1, page_size: int = 25,
@@ -1485,13 +1492,12 @@ def create_app() -> FastAPI:
     def dashboard(claims: JwtClaims = Depends(current_claims)) -> dict:
         """Counts and recent activity, all read from stored records."""
         tenant = claims.tenant_id
-        by_status: dict[str, int] = {}
-        for status_name in ("ready", "processing", "uploaded", "failed"):
-            _, count = state.documents.query(tenant, DocumentQuery(status=status_name, page_size=1))
-            by_status[status_name] = count
-        _, archived_count = state.documents.query(tenant, DocumentQuery(archived=True, page_size=1))
+        counts = state.documents.status_counts(tenant)
+        archived_count = counts.pop("archived")
+        by_status = counts
         recent, _ = state.documents.query(tenant, DocumentQuery(page_size=5))
-        projects = state.projects.list(tenant)
+        projects = state.projects.projects(tenant)
+        names = {p.id: p.name for p in state.projects.projects(tenant, include_archived=True)}
         sessions = state.research_sessions.list(tenant, claims.user_id, kind="research", limit=5)
         state.saas.ensure_org(tenant, owner_user_id=claims.user_id)
         return {
@@ -1500,8 +1506,7 @@ def create_app() -> FastAPI:
             "recent_documents": [d.to_dict() for d in recent],
             "recent_sessions": [s.to_dict() for s in sessions],
             "recent_activity": [
-                {**a.to_dict(), "project_name": next((p["project"].name for p in projects
-                                                      if p["project"].id == a.project_id), None)}
+                {**a.to_dict(), "project_name": names.get(a.project_id)}
                 for a in state.projects.activity(tenant, None, limit=10)
             ],
             "usage": state.saas.usage_report(tenant),
@@ -1524,9 +1529,9 @@ def create_app() -> FastAPI:
         except RbacError:
             pass
         projects = [
-            {"id": e["project"].id, "name": e["project"].name}
-            for e in state.projects.list(claims.tenant_id)
-            if lower in e["project"].name.lower() or lower in e["project"].description.lower()
+            {"id": p.id, "name": p.name}
+            for p in state.projects.projects(claims.tenant_id)
+            if lower in p.name.lower() or lower in p.description.lower()
         ][:8]
         sessions = [
             {"id": s.id, "title": s.title}

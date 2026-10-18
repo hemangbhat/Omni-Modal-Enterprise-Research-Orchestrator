@@ -37,7 +37,8 @@ const PUBLIC_ROUTES = new Set([
   "/sign-up",
   "/accept-invite",
   "/forgot-password",
-  "/reset-password"
+  "/reset-password",
+  "/pricing"
 ]);
 
 export function AppShell({ children }: { children: ReactNode }) {

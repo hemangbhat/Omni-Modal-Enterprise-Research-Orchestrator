@@ -5,6 +5,7 @@ const push = vi.fn();
 vi.mock("next/navigation", () => ({
   usePathname: () => "/projects",
   useRouter: () => ({ push, replace: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(window.location.search),
   useParams: () => ({ id: "p1" })
 }));
 vi.mock("@/components/top-bar", () => ({ TopBar: () => null }));

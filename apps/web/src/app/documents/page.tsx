@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { MaterialIcon } from "@/components/material-icon";
 import { apiRequest } from "@/lib/api-client";
 import { getClientApiConfig } from "@/lib/env";
@@ -91,15 +92,27 @@ function iconForKind(kind: string) {
 }
 
 export default function DocumentsPage() {
+  return (
+    <Suspense fallback={null}>
+      <DocumentsView />
+    </Suspense>
+  );
+}
+
+function DocumentsView() {
+  // ?q= comes from the top-bar search, ?status= from the dashboard.
+  const searchParams = useSearchParams();
+  const urlQuery = searchParams?.get("q") ?? "";
+  const urlStatus = searchParams?.get("status") ?? "";
   const [docs, setDocs] = useState<LiveDoc[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [entities, setEntities] = useState<EntityRecord[]>([]);
   const [entitiesLoading, setEntitiesLoading] = useState(false);
-  const [search, setSearch] = useState("");
-  const [query, setQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState("");
+  const [search, setSearch] = useState(urlQuery);
+  const [query, setQuery] = useState(urlQuery);
+  const [statusFilter, setStatusFilter] = useState(urlStatus);
   const [kindFilter, setKindFilter] = useState("");
   const [sort, setSort] = useState("newest");
   const [mine, setMine] = useState(false);
@@ -107,18 +120,17 @@ export default function DocumentsPage() {
   const [total, setTotal] = useState(0);
   const [inspectorOpen, setInspectorOpen] = useState(false);
 
-  // Seed filters from the address (?q= from the top-bar search, ?status= from the dashboard).
+  // A new search or status link while already on this page replaces the filters.
+  const appliedUrl = useRef(`${urlQuery}|${urlStatus}`);
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    const params = new URLSearchParams(window.location.search);
-    const q = params.get("q");
-    if (q) {
-      setSearch(q);
-      setQuery(q);
-    }
-    const status = params.get("status");
-    if (status) setStatusFilter(status);
-  }, []);
+    const key = `${urlQuery}|${urlStatus}`;
+    if (key === appliedUrl.current) return;
+    appliedUrl.current = key;
+    setSearch(urlQuery);
+    setQuery(urlQuery);
+    setStatusFilter(urlStatus);
+    setPage(1);
+  }, [urlQuery, urlStatus]);
 
   // Search on the server as the user types, after a short pause.
   useEffect(() => {
@@ -137,7 +149,12 @@ export default function DocumentsPage() {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
+  // Only the newest request may update the list, so a slow response for an
+  // old filter never replaces the results for the current one.
+  const latestRequest = useRef(0);
   const load = useCallback(async (quiet = false) => {
+    const request = ++latestRequest.current;
+    const current = () => request === latestRequest.current;
     if (!quiet) setLoading(true);
     try {
       const params = new URLSearchParams({ sort, page: String(page), page_size: String(PAGE_SIZE) });
@@ -148,13 +165,14 @@ export default function DocumentsPage() {
       const r = await apiRequest(withWorkspaceQuery(`/documents?${params}`), { method: "GET", headers }, { baseUrl });
       if (!r.ok) throw new Error(`The document list could not be loaded (HTTP ${r.status}).`);
       const data = (await r.json()) as { documents: LiveDoc[]; total?: number };
+      if (!current()) return;
       setDocs(data.documents ?? []);
       setTotal(data.total ?? (data.documents ?? []).length);
       setError(null);
     } catch (err) {
-      if (!quiet) setError(err instanceof Error ? err.message : "The document list could not be loaded.");
+      if (!quiet && current()) setError(err instanceof Error ? err.message : "The document list could not be loaded.");
     } finally {
-      if (!quiet) setLoading(false);
+      if (!quiet && current()) setLoading(false);
     }
     // headers/baseUrl come from the signed-in session and do not change while mounted.
     // eslint-disable-next-line react-hooks/exhaustive-deps

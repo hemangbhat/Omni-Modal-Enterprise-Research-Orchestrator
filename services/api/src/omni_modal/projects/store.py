@@ -133,6 +133,19 @@ class InMemoryProjectStore:
     def touch(self, tenant_id: str, project_id: str) -> None:
         self.update_project(tenant_id, project_id)
 
+    def list_with_counts(self, tenant_id: str) -> list[tuple[Project, dict]]:
+        with self._lock:
+            out = []
+            for project in self.list_projects(tenant_id):
+                items = [i for i in self._items.values() if i.project_id == project.id]
+                out.append((project, {
+                    "documents": sum(1 for (p, _d) in self._links if p == project.id),
+                    "findings": sum(1 for i in items if i.kind == "finding"),
+                    "notes": sum(1 for i in items if i.kind == "note"),
+                    "reports": sum(1 for r in self._reports.values() if r.project_id == project.id),
+                }))
+            return out
+
     # ── Document links ───────────────────────────────────────────────────
     def link_document(self, tenant_id: str, project_id: str, document_id: str, user_id: str) -> bool:
         with self._lock:
@@ -338,6 +351,22 @@ class PostgresProjectStore:
     def touch(self, tenant_id: str, project_id: str) -> None:
         self.update_project(tenant_id, project_id)
 
+    def list_with_counts(self, tenant_id: str) -> list[tuple[Project, dict]]:
+        rows = self._all(
+            f"""SELECT {", ".join("p." + c.strip() for c in _P.split(","))},
+                       (SELECT count(*) FROM project_documents pd WHERE pd.project_id = p.id),
+                       (SELECT count(*) FROM project_items i WHERE i.project_id = p.id AND i.kind = 'finding'),
+                       (SELECT count(*) FROM project_items i WHERE i.project_id = p.id AND i.kind = 'note'),
+                       (SELECT count(*) FROM project_reports r WHERE r.project_id = p.id)
+                FROM projects p WHERE p.tenant_id = %s ORDER BY p.updated_at DESC LIMIT 500""",
+            (tenant_id,),
+        )
+        return [
+            (self._project(r[:8]), {"documents": int(r[8]), "findings": int(r[9]), "notes": int(r[10]),
+                                    "reports": int(r[11])})
+            for r in rows
+        ]
+
     # ── Document links ───────────────────────────────────────────────────
     def link_document(self, tenant_id: str, project_id: str, document_id: str, user_id: str) -> bool:
         self.get_project(tenant_id, project_id)
@@ -414,6 +443,8 @@ class PostgresProjectStore:
         unknown = set(fields) - {"title", "body"}
         if unknown:
             raise ValueError(f"Cannot update item fields: {sorted(unknown)}")
+        if not fields:
+            return self.get_item(tenant_id, project_id, item_id)
         sets = ", ".join(f"{name} = %s" for name in fields)
         row = self._one(
             f"""UPDATE project_items SET {sets}, updated_at = now()

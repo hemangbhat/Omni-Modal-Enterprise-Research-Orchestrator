@@ -15,7 +15,7 @@ type Props = {
   onCite?: (n: number) => void;
 };
 
-const INLINE = /(\*\*[^*]+\*\*|`[^`]+`|\[\d+(?:\s*,\s*\d+)*\])/g;
+const INLINE = /(\*\*[^*]+\*\*|\*[^*\s][^*]*\*|`[^`]+`|\[\d+(?:\s*,\s*\d+)*\])/g;
 
 function Inline({ text, citationCount, activeCitation, onCite }: Omit<Props, "markdown"> & { text: string }) {
   const parts = text.split(INLINE).filter((p) => p !== "");
@@ -28,6 +28,9 @@ function Inline({ text, citationCount, activeCitation, onCite }: Omit<Props, "ma
               {part.slice(2, -2)}
             </strong>
           );
+        }
+        if (part.length > 2 && part.startsWith("*") && part.endsWith("*")) {
+          return <em key={i}>{part.slice(1, -1)}</em>;
         }
         if (part.startsWith("`") && part.endsWith("`")) {
           return (

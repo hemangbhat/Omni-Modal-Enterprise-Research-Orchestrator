@@ -179,23 +179,19 @@ class FastApiAppTests(unittest.TestCase):
         ))
         return {"Authorization": f"Bearer {reg['token']}"}
 
-    def test_projects_report_only_facts_about_the_document(self) -> None:
+    def test_projects_are_real_records_not_documents(self) -> None:
         auth = self._seed_document("fa-projects@example.com")
+        self.assertEqual(self.client.get("/projects", headers=auth).json()["projects"], [])
+        created = self.client.post("/projects", json={"name": "Q3 review"}, headers=auth)
+        self.assertEqual(created.status_code, 201, created.text)
         items = self.client.get("/projects", headers=auth).json()["projects"]
-        self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]["name"], "Q3 Board Minutes")
-        self.assertEqual(items[0]["chunk_count"], 1)
-        for invented in ("status", "priority", "updated"):
-            self.assertNotIn(invented, items[0])
+        self.assertEqual([p["name"] for p in items], ["Q3 review"])
+        self.assertEqual(items[0]["counts"]["documents"], 0)
 
-    def test_archives_report_only_facts_about_the_document(self) -> None:
+    def test_archives_list_only_archived_documents(self) -> None:
         auth = self._seed_document("fa-archives@example.com")
-        items = self.client.get("/archives", headers=auth).json()["archives"]
-        self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]["title"], "Q3 Board Minutes")
-        self.assertEqual(items[0]["source_kind"], "pdf")
-        for invented in ("kind", "classification", "expiry", "archived", "accessed", "size"):
-            self.assertNotIn(invented, items[0])
+        # A document is not "archived" just because it exists.
+        self.assertEqual(self.client.get("/archives", headers=auth).json()["documents"], [])
 
     # ── MFA (TOTP step-up) ───────────────────────────────────────────────
     def _enrol_mfa(self, email: str) -> str:

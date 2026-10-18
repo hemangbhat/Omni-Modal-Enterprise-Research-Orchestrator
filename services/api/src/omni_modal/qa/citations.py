@@ -19,7 +19,9 @@ SNIPPET_MAX = 300
 # "[3]" or "[1, 2]" not glued to a word or another bracket, so code like
 # items[0] and years like [2024] are not mistaken for citations. Only spaces
 # and tabs before a marker are absorbed, never line breaks.
-_MARKER = re.compile(r"[ \t]*(?<![\w\]])\[(\d{1,3}(?:[ \t]*,[ \t]*\d{1,3})*)\]")
+# One citation group: "[3]", "[1, 2]" or a run like "[1][2]", read together so
+# every number in a run is checked and renumbered.
+_MARKER = re.compile(r"[ \t]*(?<![\w\]])((?:\[\d{1,3}(?:[ \t]*,[ \t]*\d{1,3})*\])+)")
 _FULL_WIDTH = re.compile(r"[ \t]*【\s*(\d+(?:\s*,\s*\d+)*)\s*】")
 # Anything else in those brackets (e.g. a tool name) is not a citation.
 _FULL_WIDTH_OTHER = re.compile(r"[ \t]*【[^】]*】")
@@ -49,15 +51,24 @@ def strip_invalid_markers(text: str, passage_count: int) -> tuple[str, set[int]]
     return _MARKER.sub(_replace, text), cited
 
 
+def _stem(word: str) -> str:
+    """A rough word stem, so "approve", "approved" and "approves" match."""
+    for suffix in ("ing", "ed", "es", "s"):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            word = word[: -len(suffix)]
+            break
+    return word[:-1] if word.endswith("e") and len(word) > 3 else word
+
+
 def best_excerpt(content: str, query: str, limit: int = SNIPPET_MAX) -> str:
     """The sentence of ``content`` sharing the most words with ``query``."""
     sentences = [s for s in re.split(r"(?<=[.!?])\s+", content.strip()) if s.strip()]
     if not sentences:
         return content.strip()[:limit]
-    terms = {t.lower() for t in re.findall(r"[A-Za-z0-9_]+", query)} - _STOPWORDS
+    terms = {_stem(t) for t in {t.lower() for t in re.findall(r"[A-Za-z0-9_]+", query)} - _STOPWORDS}
     excerpt = max(
         sentences,
-        key=lambda s: sum(1 for t in re.findall(r"[A-Za-z0-9_]+", s.lower()) if t in terms),
+        key=lambda s: sum(1 for t in re.findall(r"[A-Za-z0-9_]+", s.lower()) if _stem(t) in terms),
     ).strip()
     if len(excerpt) <= limit:
         return excerpt

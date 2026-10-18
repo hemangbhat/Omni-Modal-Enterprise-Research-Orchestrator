@@ -34,6 +34,16 @@ def safe_download_name(file_name: str) -> str:
     return cleaned.strip() or "download"
 
 
+def content_disposition(file_name: str) -> str:
+    """An attachment header that works for any file name: an ASCII fallback plus
+    the exact UTF-8 name (RFC 6266), since headers themselves must be latin-1."""
+    from urllib.parse import quote  # noqa: PLC0415
+
+    name = safe_download_name(file_name)
+    ascii_name = name.encode("ascii", "ignore").decode().strip() or "download"
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(name)}"
+
+
 class StorageAdapter(Protocol):
     backend: str
 

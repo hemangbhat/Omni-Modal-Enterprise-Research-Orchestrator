@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import tempfile
+import threading
 import json
 import os
 import time
@@ -23,7 +24,10 @@ from omni_modal.entity_extraction.service import EntityExtractionService
 from omni_modal.ingestion import MultimodalIngestionPipeline
 from omni_modal.documents.dispatch import InProcessDispatcher
 from omni_modal.documents.service import DocumentService, Forbidden, InvalidState, UploadRejected
-from omni_modal.documents.store import DocumentNotFound, select_document_store
+from omni_modal.documents.store import DocumentNotFound, DocumentQuery, select_document_store
+from omni_modal.entity_extraction.records import select_entity_store
+from omni_modal.projects.service import ProjectRejected, ProjectService
+from omni_modal.projects.store import ProjectNotFound, select_project_store
 from omni_modal.ingestion.groq_transcriber import select_audio_transcriber
 from omni_modal.observability import observability
 from omni_modal.orchestration import InternalResearchAdkWorkflow, Phase1Orchestrator
@@ -45,7 +49,7 @@ from omni_modal.qa.in_memory_store import (
     InMemoryVectorStore,
 )
 from omni_modal.saas import get_saas_service
-from omni_modal.saas.adapters.storage import safe_download_name
+from omni_modal.saas.adapters.storage import content_disposition, safe_download_name
 from omni_modal.saas.plans import PLANS, PlanLimitExceeded
 from omni_modal.security.accounts import AccountError, get_account_service
 from omni_modal.security.auth import AuthError, JwtClaims, _make_jwt, jwt_secret_from_env, verify_jwt
@@ -130,6 +134,34 @@ class QueryRequestModel(BaseModel):
     min_similarity: float = Field(0.0, ge=0.0, le=1.0)
     # Continue a saved session; a new one is created when absent (stream only).
     session_id: str | None = Field(None, max_length=64)
+    # For a new session: limit research to this project's documents.
+    project_id: str | None = Field(None, max_length=64)
+
+
+class ProjectRequest(BaseModel):
+    name: str | None = Field(None, max_length=500)
+    description: str | None = Field(None, max_length=5000)
+
+
+class ProjectDocumentRequest(BaseModel):
+    document_id: str = Field(..., max_length=64)
+
+
+class ProjectItemRequest(BaseModel):
+    kind: str = Field(..., max_length=20)
+    title: str = Field(..., max_length=1000)
+    body: str | None = Field(None, max_length=50_000)
+    citations: list[dict] | None = None
+    source_session_id: str | None = Field(None, max_length=64)
+
+
+class ProjectItemUpdate(BaseModel):
+    title: str | None = Field(None, max_length=1000)
+    body: str | None = Field(None, max_length=50_000)
+
+
+class SessionProjectRequest(BaseModel):
+    project_id: str | None = Field(None, max_length=64)
 
 
 class CreateSessionRequest(BaseModel):
@@ -212,6 +244,7 @@ class _State:
     password_resets: Any = None
     retriever: Any = None
     documents: Any = None
+    projects: Any = None
     dispatcher: Any = None
     research_sessions: Any = None
     rewriter: Any = None
@@ -230,7 +263,7 @@ def _build_runtime() -> None:
     # Local Whisper when installed, else Groq's hosted Whisper (the deployment
     # cannot run a local model), else a clear "Whisper is not installed" error.
     audio = select_audio_transcriber()
-    state.entity_service = EntityExtractionService()
+    state.entity_service = EntityExtractionService(store=select_entity_store())
 
     # Shared coordination primitives — Redis-backed when REDIS_URL is set
     # (stateless, horizontally-scalable web tier), else in-process.
@@ -280,11 +313,17 @@ def _build_runtime() -> None:
     except Exception as exc:  # noqa: BLE001 - a resume problem must not stop the API starting
         observability.capture_exception(exc, operation="documents.resume_unfinished")
     state.retriever = retriever
+    if isinstance(retriever, InMemoryChunkRetriever):
+        retriever.is_searchable = _document_searchable
     state.workflow = InternalResearchAdkWorkflow(
         retriever, external_client_from_environment(), select_answer_synthesizer()
     )
     chat_client = select_chat_client()
     state.research_sessions = select_research_session_service()
+    state.projects = ProjectService(
+        store=select_project_store(), documents=state.documents,
+        sessions=state.research_sessions, entities=state.entity_service,
+    )
     state.rewriter = QueryRewriter(chat_client)
     state.assistant = Assistant(
         retriever=retriever,
@@ -305,6 +344,46 @@ def _build_runtime() -> None:
     from omni_modal.security.pg_audit_sink import select_audit_sink  # noqa: PLC0415
 
     state.audit_sink = select_audit_sink()
+
+
+_MODEL_STATUS_TTL = 300.0
+_model_status_cache: dict[str, object] = {"at": 0.0, "value": ""}
+
+
+_model_status_lock = threading.Lock()
+
+
+def _refresh_model_status() -> None:
+    client = select_chat_client()
+    try:
+        client.complete("Reply with OK.", [{"role": "user", "content": "OK?"}], max_tokens=5)
+        value = "ok"
+    except Exception:  # noqa: BLE001
+        value = "unreachable (answers fall back to extracts)"
+    _model_status_cache.update(at=time.time(), value=value, refreshing=False)
+
+
+def _model_provider_status() -> str:
+    """The model provider's last known state. The probe itself never waits on the
+    provider: a stale value is refreshed by one background thread at most every 5 minutes."""
+    if select_chat_client() is None:
+        return "not configured (answers use extracts)"
+    with _model_status_lock:
+        stale = time.time() - float(_model_status_cache["at"]) >= _MODEL_STATUS_TTL
+        if stale and not _model_status_cache.get("refreshing"):
+            _model_status_cache["refreshing"] = True
+            threading.Thread(target=_refresh_model_status, daemon=True, name="ModelStatus").start()
+    return str(_model_status_cache["value"] or "checking")
+
+
+def _document_searchable(tenant_id: str, document_id: str) -> bool:
+    """In the demo store: archived documents are left out of research.
+    Documents loaded straight into the vector store (scripts, tests) have no record and stay searchable."""
+    try:
+        doc, _ = state.documents.get(tenant_id, document_id)
+    except DocumentNotFound:
+        return True
+    return doc.archived_at is None
 
 
 def _document_exists(tenant_id: str, document_id: str) -> bool:
@@ -474,6 +553,19 @@ def create_app() -> FastAPI:
                 ok = False
         else:
             checks["redis"] = "in-process (not configured)"
+
+        storage = getattr(state.saas, "storage", None) if state.saas is not None else None
+        if storage is not None:
+            try:
+                await run_in_threadpool(storage.head, "readiness-probe/does-not-exist")
+                checks["storage"] = f"ok ({storage.backend})"
+            except Exception as exc:  # noqa: BLE001
+                checks["storage"] = f"error: {type(exc).__name__}"
+                ok = False
+
+        # The model provider is optional (answers fall back to extracts without it),
+        # so its state is reported but never makes the service "not ready".
+        checks["model_provider"] = _model_provider_status()
 
         body = {"status": "ready" if ok else "not_ready", "checks": checks}
         return JSONResponse(body, status_code=200 if ok else 503)
@@ -694,22 +786,38 @@ def create_app() -> FastAPI:
     # so the blocking session-store, metering and model calls never stall the
     # event loop. A sync generator passed to StreamingResponse is iterated in a
     # worker thread too.
-    def _load_history(claims: JwtClaims, session_id: str | None, kind: str) -> list[tuple[str, str]]:
-        """Earlier turns of a caller-owned session of ``kind``; 404 for anyone else's."""
+    def _load_session(claims: JwtClaims, session_id: str | None, kind: str) -> tuple[list[tuple[str, str]], str | None]:
+        """Earlier turns and project of a caller-owned session of ``kind``; 404 for anyone else's."""
         if not session_id:
-            return []
+            return [], None
         try:
             detail = state.research_sessions.get(claims.tenant_id, claims.user_id, session_id)
         except SessionNotFound as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found.") from exc
         if detail.session.kind != kind:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found.")
-        return [(m.role, m.content) for m in detail.messages[-2 * HISTORY_TURNS:]]
+        history = [(m.role, m.content) for m in detail.messages[-2 * HISTORY_TURNS:]]
+        return history, detail.session.project_id
 
-    def _session_for(claims: JwtClaims, session_id: str | None, kind: str, first_text: str) -> str:
+    def _load_history(claims: JwtClaims, session_id: str | None, kind: str) -> list[tuple[str, str]]:
+        return _load_session(claims, session_id, kind)[0]
+
+    def _project_scope(claims: JwtClaims, project_id: str | None) -> tuple[str, ...] | None:
+        """The document ids a project limits research to; 404 for another tenant's project."""
+        if not project_id:
+            return None
+        try:
+            return state.projects.scope(claims.tenant_id, project_id)
+        except ProjectNotFound as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Project not found.") from exc
+
+    def _session_for(claims: JwtClaims, session_id: str | None, kind: str, first_text: str,
+                     project_id: str | None = None) -> str:
         if session_id:
             return session_id
-        return state.research_sessions.create(claims.tenant_id, claims.user_id, title=first_text, kind=kind).id
+        return state.research_sessions.create(
+            claims.tenant_id, claims.user_id, title=first_text, kind=kind, project_id=project_id,
+        ).id
 
     class _Turn:
         """What one streamed answer has produced so far, saved exactly once."""
@@ -743,9 +851,11 @@ def create_app() -> FastAPI:
 
     @app.post("/query/stream", tags=["research"])
     def query_stream(body: QueryRequestModel, claims: JwtClaims = Depends(require_roles("/query/stream"))):
-        history = _load_history(claims, body.session_id, "research")
+        history, session_project = _load_session(claims, body.session_id, "research")
+        project_id = session_project if body.session_id else body.project_id
+        scope = _project_scope(claims, project_id)
         meter(claims, "queries")
-        session_id = _session_for(claims, body.session_id, "research", body.question)
+        session_id = _session_for(claims, body.session_id, "research", body.question, project_id)
         turn = _Turn(claims, session_id, body.question)
 
         def _events():
@@ -755,7 +865,7 @@ def create_app() -> FastAPI:
                 req = QueryRequest(
                     tenant_id=claims.tenant_id, user_id=claims.user_id, question=body.question,
                     top_k=body.top_k, min_similarity=body.min_similarity,
-                    history=tuple(history), search_query=search_query,
+                    history=tuple(history), search_query=search_query, document_ids=scope,
                 )
                 result = None
                 try:
@@ -772,8 +882,8 @@ def create_app() -> FastAPI:
                     return
                 response = result.response.to_json_dict()
                 turn.save(response["answer_markdown"], response["status"], response["citations"])
-                yield _sse("done", {**response, "trace": result.trace,
-                                    "session_id": session_id, "search_query": search_query})
+                yield _sse("done", {**response, "trace": result.trace, "session_id": session_id,
+                                    "search_query": search_query, "project_id": project_id})
             finally:
                 # Runs on normal completion (no-op), errors, and client disconnects.
                 turn.save_unfinished()
@@ -1120,6 +1230,7 @@ def create_app() -> FastAPI:
     @app.delete("/documents/{document_id}", tags=["documents"])
     def delete_document(document_id: str, claims: JwtClaims = Depends(require_roles("/documents/manage"))) -> dict:
         _documents_call(state.documents.delete, claims.tenant_id, claims.user_id, claims.roles, document_id)
+        state.projects.forget_document(claims.tenant_id, document_id)
         return {"deleted": True}
 
     @app.post("/documents/{document_id}/reprocess", status_code=202, tags=["documents"])
@@ -1192,41 +1303,267 @@ def create_app() -> FastAPI:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Job not found.") from exc
         return {**job.to_dict(), "error_code": None}
 
-    # ── Document views ───────────────────────────────────────────────────
+    # ── Document library ─────────────────────────────────────────────────
     def _ws_filter(workspace_id: str | None):
         return state.saas.documents_in_workspace(workspace_id) if workspace_id else None
 
-    @app.get("/documents", tags=["documents"])
-    def documents(workspace_id: str | None = None, claims: JwtClaims = Depends(require_roles("/documents"))) -> dict:
-        docs = _all_docs(claims.tenant_id, _ws_filter(workspace_id))
-        return {"documents": docs, "total": len(docs)}
+    def _library_page(claims: JwtClaims, *, archived: bool, q: str, status_: str | None, kind: str | None,
+                      project_id: str | None, mine: bool, sort: str, page: int, page_size: int,
+                      workspace_id: str | None) -> dict:
+        scope: set[str] | None = None
+        if project_id:
+            scope = set(_projects_call(state.projects.scope, claims.tenant_id, project_id))
+        workspace = _ws_filter(workspace_id)
+        if workspace is not None:
+            scope = set(workspace) if scope is None else scope & set(workspace)
+        docs, total = _documents_call(state.documents.query, claims.tenant_id, DocumentQuery(
+            text=q, status=status_, source_kind=kind, uploaded_by=claims.user_id if mine else None,
+            archived=archived, document_ids=frozenset(scope) if scope is not None else None,
+            sort=sort, page=page, page_size=page_size,
+        ))
+        names = {p.id: p.name for p in state.projects.projects(claims.tenant_id, include_archived=True)}
+        memberships = state.projects.projects_for_documents(claims.tenant_id, [d.id for d in docs])
+        items = [
+            {**d.to_dict(), "projects": [{"id": pid, "name": names.get(pid, "")} for pid in memberships.get(d.id, [])]}
+            for d in docs
+        ]
+        return {"documents": items, "total": total, "page": max(1, page), "page_size": max(1, min(page_size, 200))}
 
-    @app.get("/projects", tags=["documents"])
-    async def projects(workspace_id: str | None = None, claims: JwtClaims = Depends(require_roles("/projects"))) -> dict:
-        wf = _ws_filter(workspace_id)
-        out: list[dict] = []
-        rows = _all_docs(claims.tenant_id, wf)
-        for d in rows:
-            did = d["document_id"]
-            out.append({
-                "id": did, "code": f"PRJ-{did[:8].upper()}", "name": d["title"],
-                "icon": "science" if d["source_kind"] == "audio" else "description",
-                "source_kind": d["source_kind"], "chunk_count": d["chunk_count"],
-            })
-        return {"projects": out, "total": len(out)}
+    @app.get("/documents", tags=["documents"])
+    def documents(q: str = "", status: str | None = None, kind: str | None = None,  # noqa: A002
+                  project_id: str | None = None, mine: bool = False, sort: str = "newest",
+                  page: int = 1, page_size: int = 25, workspace_id: str | None = None,
+                  claims: JwtClaims = Depends(require_roles("/documents"))) -> dict:
+        """The library: search titles and file names, filter, sort and page. Archived documents are left out."""
+        return _library_page(claims, archived=False, q=q, status_=status, kind=kind, project_id=project_id,
+                             mine=mine, sort=sort, page=page, page_size=page_size, workspace_id=workspace_id)
+
+    @app.post("/documents/{document_id}/archive", tags=["documents"])
+    def archive_document(document_id: str, claims: JwtClaims = Depends(require_roles("/documents/manage"))) -> dict:
+        doc = _documents_call(state.documents.archive, claims.tenant_id, claims.user_id, claims.roles, document_id)
+        return {"document": doc.to_dict()}
+
+    @app.post("/documents/{document_id}/restore", tags=["documents"])
+    def restore_document(document_id: str, claims: JwtClaims = Depends(require_roles("/documents/manage"))) -> dict:
+        doc = _documents_call(state.documents.restore, claims.tenant_id, claims.user_id, claims.roles, document_id)
+        return {"document": doc.to_dict()}
+
+    # ── Projects ─────────────────────────────────────────────────────────
+    def _projects_call(fn, *args, **kwargs):
+        """Run a ProjectService call, turning its errors into HTTP answers."""
+        try:
+            return fn(*args, **kwargs)
+        except (ProjectNotFound, SessionNotFound) as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found.") from exc
+        except DocumentNotFound as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found.") from exc
+        except Forbidden as exc:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
+        except InvalidState as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+        except ProjectRejected as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+    @app.get("/projects", tags=["projects"])
+    def list_projects(include_archived: bool = False,
+                      claims: JwtClaims = Depends(require_roles("/projects"))) -> dict:
+        entries = state.projects.list(claims.tenant_id, include_archived=include_archived)
+        projects = [{**e["project"].to_dict(), "counts": e["counts"]} for e in entries]
+        return {"projects": projects, "total": len(projects)}
+
+    @app.post("/projects", status_code=201, tags=["projects"])
+    def create_project(body: ProjectRequest, claims: JwtClaims = Depends(require_roles("/projects/manage"))) -> dict:
+        project = _projects_call(state.projects.create, claims.tenant_id, claims.user_id,
+                                 name=body.name or "", description=body.description or "")
+        return project.to_dict()
+
+    @app.get("/projects/{project_id}", tags=["projects"])
+    def get_project(project_id: str, claims: JwtClaims = Depends(require_roles("/projects"))) -> dict:
+        tenant = claims.tenant_id
+        project = _projects_call(state.projects.get, tenant, project_id)
+        documents = state.projects.documents(tenant, project_id)
+        return {
+            "project": project.to_dict(),
+            "documents": [d.to_dict() for d in documents],
+            "items": [i.to_dict() for i in state.projects.items(tenant, project_id)],
+            "reports": [r.to_dict(with_markdown=False) for r in state.projects.reports(tenant, project_id)],
+            "sessions": [s.to_dict() for s in state.projects.sessions(tenant, claims.user_id, project_id)],
+            "insights": state.projects.insights(tenant, project_id),
+            "activity": [a.to_dict() for a in state.projects.activity(tenant, project_id, limit=30)],
+        }
+
+    @app.patch("/projects/{project_id}", tags=["projects"])
+    def update_project(project_id: str, body: ProjectRequest,
+                       claims: JwtClaims = Depends(require_roles("/projects/manage"))) -> dict:
+        return _projects_call(state.projects.update, claims.tenant_id, claims.user_id, project_id,
+                              name=body.name, description=body.description).to_dict()
+
+    @app.post("/projects/{project_id}/archive", tags=["projects"])
+    def archive_project(project_id: str, claims: JwtClaims = Depends(require_roles("/projects/manage"))) -> dict:
+        return _projects_call(state.projects.archive, claims.tenant_id, claims.user_id, claims.roles,
+                              project_id).to_dict()
+
+    @app.post("/projects/{project_id}/restore", tags=["projects"])
+    def restore_project(project_id: str, claims: JwtClaims = Depends(require_roles("/projects/manage"))) -> dict:
+        return _projects_call(state.projects.restore, claims.tenant_id, claims.user_id, claims.roles,
+                              project_id).to_dict()
+
+    @app.post("/projects/{project_id}/documents", tags=["projects"])
+    def add_project_document(project_id: str, body: ProjectDocumentRequest,
+                             claims: JwtClaims = Depends(require_roles("/projects/manage"))) -> dict:
+        _projects_call(state.projects.add_document, claims.tenant_id, claims.user_id, project_id, body.document_id)
+        return {"added": True}
+
+    @app.delete("/projects/{project_id}/documents/{document_id}", tags=["projects"])
+    def remove_project_document(project_id: str, document_id: str,
+                                claims: JwtClaims = Depends(require_roles("/projects/manage"))) -> dict:
+        _projects_call(state.projects.remove_document, claims.tenant_id, claims.user_id, project_id, document_id)
+        return {"removed": True}
+
+    @app.post("/projects/{project_id}/items", status_code=201, tags=["projects"])
+    def add_project_item(project_id: str, body: ProjectItemRequest,
+                         claims: JwtClaims = Depends(require_roles("/projects/manage"))) -> dict:
+        item = _projects_call(
+            state.projects.add_item, claims.tenant_id, claims.user_id, project_id, kind=body.kind,
+            title=body.title, body=body.body or "", citations=body.citations or [],
+            source_session_id=body.source_session_id,
+        )
+        return item.to_dict()
+
+    @app.patch("/projects/{project_id}/items/{item_id}", tags=["projects"])
+    def update_project_item(project_id: str, item_id: str, body: ProjectItemUpdate,
+                            claims: JwtClaims = Depends(require_roles("/projects/manage"))) -> dict:
+        return _projects_call(state.projects.update_item, claims.tenant_id, claims.user_id, claims.roles,
+                              project_id, item_id, title=body.title, body=body.body).to_dict()
+
+    @app.delete("/projects/{project_id}/items/{item_id}", tags=["projects"])
+    def delete_project_item(project_id: str, item_id: str,
+                            claims: JwtClaims = Depends(require_roles("/projects/manage"))) -> dict:
+        _projects_call(state.projects.delete_item, claims.tenant_id, claims.user_id, claims.roles,
+                       project_id, item_id)
+        return {"deleted": True}
+
+    @app.get("/projects/{project_id}/search", tags=["projects"])
+    def search_project(project_id: str, q: str = "", claims: JwtClaims = Depends(require_roles("/projects"))) -> dict:
+        _projects_call(state.projects.get, claims.tenant_id, project_id)
+        return state.projects.search(claims.tenant_id, project_id, q[:200])
+
+    @app.post("/projects/{project_id}/reports", status_code=201, tags=["projects"])
+    def create_project_report(project_id: str, claims: JwtClaims = Depends(require_roles("/projects/manage"))) -> dict:
+        return _projects_call(state.projects.report_for_project, claims.tenant_id, claims.user_id,
+                              project_id).to_dict()
+
+    @app.post("/research/sessions/{session_id}/report", status_code=201, tags=["projects"])
+    def create_session_report(session_id: str,
+                              claims: JwtClaims = Depends(require_roles("/projects/manage"))) -> dict:
+        return _projects_call(state.projects.report_for_session, claims.tenant_id, claims.user_id,
+                              session_id).to_dict()
+
+    @app.put("/research/sessions/{session_id}/project", tags=["projects"])
+    def set_session_project(session_id: str, body: SessionProjectRequest,
+                            claims: JwtClaims = Depends(require_roles("/projects/manage"))) -> dict:
+        return _projects_call(state.projects.link_session, claims.tenant_id, claims.user_id,
+                              body.project_id, session_id).to_dict()
+
+    @app.get("/reports", tags=["projects"])
+    def my_reports(claims: JwtClaims = Depends(require_roles("/projects"))) -> dict:
+        reports_ = state.projects.my_reports(claims.tenant_id, claims.user_id)
+        return {"reports": [r.to_dict(with_markdown=False) for r in reports_]}
+
+    @app.get("/reports/{report_id}", tags=["projects"])
+    def get_report(report_id: str, claims: JwtClaims = Depends(require_roles("/projects"))) -> dict:
+        return _projects_call(state.projects.get_report, claims.tenant_id, claims.user_id, report_id).to_dict()
+
+    @app.get("/reports/{report_id}/download", tags=["projects"])
+    def download_report(report_id: str, claims: JwtClaims = Depends(require_roles("/projects"))):
+        report = _projects_call(state.projects.get_report, claims.tenant_id, claims.user_id, report_id)
+        return Response(report.markdown, media_type="text/markdown; charset=utf-8",
+                        headers={"Content-Disposition": content_disposition(f"{report.title}.md")})
 
     @app.get("/archives", tags=["documents"])
-    async def archives(workspace_id: str | None = None, claims: JwtClaims = Depends(require_roles("/archives"))) -> dict:
-        wf = _ws_filter(workspace_id)
-        out: list[dict] = []
-        for d in _all_docs(claims.tenant_id, wf):
-            did = d["document_id"]
-            out.append({
-                "id": did, "name": f"ARC-{did[:8].upper()}", "title": d["title"],
-                "source_kind": d["source_kind"], "chunk_count": d["chunk_count"],
-                "status": d.get("status", "ready"),
-            })
-        return {"archives": out, "total": len(out)}
+    def archives(q: str = "", kind: str | None = None, sort: str = "newest", page: int = 1, page_size: int = 25,
+                 workspace_id: str | None = None, claims: JwtClaims = Depends(require_roles("/archives"))) -> dict:
+        """Archived documents: kept, but left out of research until restored."""
+        return _library_page(claims, archived=True, q=q, status_=None, kind=kind, project_id=None, mine=False,
+                             sort=sort, page=page, page_size=page_size, workspace_id=workspace_id)
+
+    # ── Dashboard and search ─────────────────────────────────────────────
+    @app.get("/dashboard", tags=["workspace"])
+    def dashboard(claims: JwtClaims = Depends(current_claims)) -> dict:
+        """Counts and recent activity, all read from stored records."""
+        tenant = claims.tenant_id
+        counts = state.documents.status_counts(tenant)
+        archived_count = counts.pop("archived")
+        by_status = counts
+        recent, _ = state.documents.query(tenant, DocumentQuery(page_size=5))
+        projects = state.projects.projects(tenant)
+        names = {p.id: p.name for p in state.projects.projects(tenant, include_archived=True)}
+        sessions = state.research_sessions.list(tenant, claims.user_id, kind="research", limit=5)
+        state.saas.ensure_org(tenant, owner_user_id=claims.user_id)
+        return {
+            "documents": {**by_status, "archived": archived_count, "total": sum(by_status.values())},
+            "projects": len(projects),
+            "recent_documents": [d.to_dict() for d in recent],
+            "recent_sessions": [s.to_dict() for s in sessions],
+            "recent_activity": [
+                {**a.to_dict(), "project_name": names.get(a.project_id)}
+                for a in state.projects.activity(tenant, None, limit=10)
+            ],
+            "usage": state.saas.usage_report(tenant),
+        }
+
+    @app.get("/search", tags=["workspace"])
+    def global_search(q: str = "", claims: JwtClaims = Depends(current_claims)) -> dict:
+        """Search document titles and file names, project names and descriptions, and your own research titles."""
+        text = q.strip()[:200]
+        empty = {"documents": [], "projects": [], "sessions": []}
+        scope = "Document titles and file names, project names and descriptions, and your research session titles."
+        if len(text) < 2:
+            return {**empty, "scope": scope}
+        lower = text.lower()
+        documents: list[dict] = []
+        try:
+            assert_endpoint_roles("/documents", claims.roles)
+            docs, _ = state.documents.query(claims.tenant_id, DocumentQuery(text=text, page_size=8))
+            documents = [{"id": d.id, "title": d.title, "status": d.status} for d in docs]
+        except RbacError:
+            pass
+        projects = [
+            {"id": p.id, "name": p.name}
+            for p in state.projects.projects(claims.tenant_id)
+            if lower in p.name.lower() or lower in p.description.lower()
+        ][:8]
+        sessions = [
+            {"id": s.id, "title": s.title}
+            for s in state.research_sessions.list(claims.tenant_id, claims.user_id, kind="research", limit=200)
+            if lower in s.title.lower()
+        ][:8]
+        return {"documents": documents, "projects": projects, "sessions": sessions, "scope": scope}
+
+    # ── Billing history and ingestion failures ───────────────────────────
+    @app.get("/billing/invoices", tags=["billing"])
+    def billing_invoices(claims: JwtClaims = Depends(require_roles("/billing/portal"))) -> dict:
+        org = state.saas.ensure_org(claims.tenant_id, owner_user_id=claims.user_id)
+        try:
+            invoices = state.saas.billing.list_invoices(org.stripe_customer_id)
+        except Exception as exc:  # noqa: BLE001 - Stripe trouble must not break the billing page
+            observability.capture_exception(exc, operation="billing.invoices")
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Billing history could not be loaded from Stripe.") from exc
+        if invoices is None:
+            return {"available": False, "invoices": []}
+        return {"available": True, "invoices": invoices}
+
+    @app.get("/admin/ingestion/failures", tags=["admin"])
+    def ingestion_failures(claims: JwtClaims = Depends(require_roles("/admin/ingestion"))) -> dict:
+        rows = state.documents.failures(claims.tenant_id)
+        return {"failures": [
+            {"document": d.to_dict(), "job": job.to_dict() if job else None} for d, job in rows
+        ]}
+
+    @app.post("/admin/ingestion/failures/{document_id}/retry", status_code=202, tags=["admin"])
+    def retry_ingestion(document_id: str, claims: JwtClaims = Depends(require_roles("/admin/ingestion"))) -> dict:
+        job = _documents_call(state.documents.reprocess, claims.tenant_id, claims.user_id, claims.roles, document_id)
+        return {"job": job.to_dict()}
 
     @app.get("/entities/{document_id}", tags=["documents"])
     async def entities(document_id: str, claims: JwtClaims = Depends(require_roles("/entities/"))) -> dict:

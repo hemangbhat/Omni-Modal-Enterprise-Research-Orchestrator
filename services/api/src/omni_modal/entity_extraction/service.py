@@ -12,14 +12,12 @@ Selected by ``ENTITY_NER_MODEL_PATH`` (preferred) or the legacy
 The service is safe to call on any chunk; it never raises (logs failures
 through observability and returns an empty output on error).
 
-Records are accumulated in ``_records`` (keyed by ``tenant_id:document_id``)
-so the GET /entities endpoint can retrieve them without a database.
+Records are kept in an entity store (``omni_modal.entity_extraction.records``):
+Postgres when ``DATABASE_URL`` is set, else memory.
 """
 from __future__ import annotations
 
 import os
-import threading
-from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -72,16 +70,16 @@ def build_entity_extractor() -> EnterpriseEntityExtractor:
 class EntityExtractionService:
     """Runs entity extraction on every chunk of a completed IngestionResult.
 
-    Designed to be called by the BackgroundWorker after a successful ingest.
-    Entity records are persisted in ``_records`` (in-memory, keyed by
-    ``tenant_id:document_id``) so the /entities API can retrieve them.
+    Called after a successful ingest. Records go to the injected store
+    (Postgres when configured, else memory) so the /entities API and project
+    insights can read them.
     """
 
-    def __init__(self, extractor: EnterpriseEntityExtractor | None = None) -> None:
+    def __init__(self, extractor: EnterpriseEntityExtractor | None = None, store=None) -> None:
+        from omni_modal.entity_extraction.records import InMemoryEntityStore  # noqa: PLC0415
+
         self._extractor = extractor or build_entity_extractor()
-        # In-memory record store: "tenant_id:document_id" → list[EntityRecord]
-        self._records: dict[str, list[Any]] = defaultdict(list)
-        self._lock = threading.Lock()
+        self._store = store if store is not None else InMemoryEntityStore()
 
     def extract_from_result(self, result: IngestionResult) -> list[ExtractionOutput]:
         if result.status != "ready" or not result.chunks:
@@ -126,19 +124,17 @@ class EntityExtractionService:
             records.extend(new_records)
 
         # Replace, not append: reprocessing a document must not duplicate its entities.
-        key = f"{result.tenant_id}:{result.document_id}"
-        with self._lock:
-            self._records[key] = list(records)
-
+        self._store.replace(result.tenant_id, result.document_id, records)
         return records
 
     def delete_records(self, tenant_id: str, document_id: str) -> None:
         """Forget a document's entities (used when the document is deleted)."""
-        with self._lock:
-            self._records.pop(f"{tenant_id}:{document_id}", None)
+        self._store.delete(tenant_id, document_id)
 
     def get_records(self, tenant_id: str, document_id: str) -> list[Any]:
         """Return stored entity records for a specific document."""
-        key = f"{tenant_id}:{document_id}"
-        with self._lock:
-            return list(self._records.get(key, []))
+        return self._store.get(tenant_id, document_id)
+
+    def records_for_documents(self, tenant_id: str, document_ids: list[str]) -> list[Any]:
+        """Entity records across several documents (a project's insights)."""
+        return self._store.for_documents(tenant_id, list(document_ids))

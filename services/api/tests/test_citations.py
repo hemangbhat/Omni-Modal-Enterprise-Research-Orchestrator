@@ -77,6 +77,13 @@ class FinalizeAnswerTests(unittest.TestCase):
         )
         self.assertEqual(resp.citations[0].snippet, "Priya Shah owns the hiring plan.")
 
+    def test_snippet_matches_word_forms(self) -> None:
+        from omni_modal.qa.citations import best_excerpt
+
+        content = "Northwind Q3 Board Minutes. Revenue grew. The board approved a budget of 2.4 million."
+        self.assertEqual(best_excerpt(content, "What did the board approve?"),
+                         "The board approved a budget of 2.4 million.")
+
     def test_snippet_ignores_filler_words(self) -> None:
         from omni_modal.qa.citations import best_excerpt
 

@@ -38,6 +38,7 @@ export type DocumentRecord = {
   created_at: number;
   updated_at: number;
   processed_at: number | null;
+  archived_at?: number | null;
 };
 
 export type JobRecord = {
@@ -168,6 +169,14 @@ export function getDocument(documentId: string): Promise<DocumentDetail> {
 
 export function deleteDocument(documentId: string): Promise<{ deleted: boolean }> {
   return call(`/documents/${encodeURIComponent(documentId)}`, "DELETE");
+}
+
+export function archiveDocument(documentId: string): Promise<{ document: DocumentRecord }> {
+  return call(`/documents/${encodeURIComponent(documentId)}/archive`, "POST");
+}
+
+export function restoreDocument(documentId: string): Promise<{ document: DocumentRecord }> {
+  return call(`/documents/${encodeURIComponent(documentId)}/restore`, "POST");
 }
 
 export function reprocessDocument(documentId: string): Promise<DocumentDetail> {

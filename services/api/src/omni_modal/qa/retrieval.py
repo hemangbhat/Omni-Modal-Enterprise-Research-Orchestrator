@@ -52,10 +52,14 @@ class PgVectorChunkRetriever:
                 request.tenant_id,
                 request.top_k,
                 request.min_similarity,
+                request.document_ids,
             )
             cached = self._cache.get(_cache_key)
             if cached is not None:
                 return cached
+
+        if request.document_ids is not None and not request.document_ids:
+            return []  # an empty scope (a project with no documents) matches nothing
 
         if not self._pool and not self._database_url:
             error = RuntimeError("DATABASE_URL is required for pgvector retrieval.")
@@ -100,6 +104,7 @@ class PgVectorChunkRetriever:
                     raise
 
             vector_literal = "[" + ",".join(str(value) for value in embedding) + "]"
+            scope = None if request.document_ids is None else list(request.document_ids)
 
             # --- Search sub-span ---
             with observability.child_span("retrieval.search", "execute vector search"):
@@ -144,6 +149,8 @@ class PgVectorChunkRetriever:
                                     inner join documents d on d.id = e.document_id
                                     where e.tenant_id = %s
                                       and d.status = 'ready'
+                                      and d.archived_at is null
+                                      and (%s::uuid[] is null or d.id = any(%s::uuid[]))
                                       and (%s = 0 or 1 - (e.embedding <=> %s::vector) >= %s)
                                     order by e.embedding <=> %s::vector
                                     limit %s
@@ -151,6 +158,8 @@ class PgVectorChunkRetriever:
                                     (
                                         vector_literal,
                                         request.tenant_id,
+                                        scope,
+                                        scope,
                                         request.min_similarity,
                                         vector_literal,
                                         request.min_similarity,

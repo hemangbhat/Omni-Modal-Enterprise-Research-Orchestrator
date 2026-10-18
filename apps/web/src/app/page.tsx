@@ -3,242 +3,196 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { MaterialIcon } from "@/components/material-icon";
-import { apiRequest } from "@/lib/api-client";
-import { getClientApiConfig } from "@/lib/env";
+import { TopBar } from "@/components/top-bar";
+import { describeActivity } from "@/lib/projects-api";
+import { getDashboard, type Dashboard } from "@/lib/workspace-api";
 
-type ComponentEntry = { name: string; state: string; detail: string };
+const STAT_TILES: { key: "ready" | "processing" | "failed"; label: string; href: string }[] = [
+  { key: "ready", label: "Ready to search", href: "/documents?status=ready" },
+  { key: "processing", label: "Processing", href: "/documents?status=processing" },
+  { key: "failed", label: "Failed", href: "/documents?status=failed" }
+];
 
-type HealthData = {
-  phase: number;
-  status: string;
-  components: ComponentEntry[];
-};
-
-const STATE_COLOR: Record<string, string> = {
-  ready: "text-emerald-400",
-  deferred: "text-amber-400",
-  contract: "text-on-surface-variant"
-};
-const STATE_DOT: Record<string, string> = {
-  ready: "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.5)]",
-  deferred: "bg-amber-400",
-  contract: "bg-outline"
-};
-
-export default function HomePage() {
-  const [health, setHealth] = useState<HealthData | null>(null);
-  const [docCount, setDocCount] = useState<number | null>(null);
-
-  useEffect(() => {
-    const { baseUrl, token } = getClientApiConfig();
-    const headers: Record<string, string> = {};
-    if (token) headers.Authorization = `Bearer ${token}`;
-
-    // Fetch /health (public)
-    apiRequest("/health", { method: "GET" }, { baseUrl })
-      .then((r) => r.json())
-      .then((data: HealthData) => setHealth(data))
-      .catch(() => null);
-
-    // Fetch /documents for doc count
-    apiRequest("/documents", { method: "GET", headers }, { baseUrl })
-      .then((r) => r.json())
-      .then((data: { total: number }) => setDocCount(data.total ?? null))
-      .catch(() => null);
-  }, []);
-
-  const systemOk = health?.status === "ok";
-  const readyCount = health?.components.filter((c) => c.state === "ready").length ?? 0;
-  const totalCount = health?.components.length ?? 0;
-
-  return (
-    <main className="relative flex flex-1 flex-col bg-surface">
-      <div className="mx-auto flex w-full max-w-max_width flex-col gap-[48px] px-lg py-xl md:px-xl">
-
-        {/* Hero */}
-        <section className="premium-card relative flex flex-col items-start justify-between gap-lg overflow-hidden rounded-xl p-xl md:flex-row md:items-center">
-          <div className="hero-glow" />
-          <div className="relative z-10">
-            <p className="mb-sm font-mono-sm text-mono-sm uppercase tracking-widest text-primary-fixed-dim">
-              {health ? (systemOk ? "System Status: Optimal" : "System Status: Degraded") : "Connecting to backend…"}
-            </p>
-            <h2 className="mb-sm font-display-lg text-display-lg text-on-surface">
-              Welcome, Researcher
-            </h2>
-            <p className="max-w-2xl font-body-lg text-body-lg text-on-surface-variant">
-              {health
-                ? `${readyCount} of ${totalCount} components ready. ${docCount !== null ? `${docCount} document${docCount !== 1 ? "s" : ""} in your knowledge base.` : ""}`
-                : "Upload documents, run research queries, and monitor your pipeline."}
-            </p>
-          </div>
-          <div className="relative z-10 shrink-0">
-            <Link
-              href="/research"
-              className="flex items-center gap-sm rounded-lg bg-primary-container px-lg py-md font-label-md text-label-md text-on-primary-container shadow-[0_0_20px_rgba(0,229,255,0.2)] transition-colors hover:bg-primary"
-            >
-              <MaterialIcon name="bolt" size={18} />
-              Start Research
-            </Link>
-          </div>
-        </section>
-
-        {/* Live metrics from /health + /documents */}
-        <section className="grid grid-cols-1 gap-lg md:grid-cols-2 lg:grid-cols-4">
-          <MetricCard
-            label="Documents Indexed"
-            value={docCount !== null ? String(docCount) : "—"}
-            icon="description"
-          />
-          <MetricCard
-            label="Components Ready"
-            value={health ? `${readyCount}/${totalCount}` : "—"}
-            icon="check_circle"
-            note={health && systemOk ? "All green" : health ? "Check settings" : undefined}
-          />
-          <MetricCard
-            label="Embedding Backend"
-            value={
-              health?.components.find((c) => c.name === "embedding")?.detail
-                ?.replace(/^Embedding backend: /, "")
-                .split(" ")[0] ?? "—"
-            }
-            icon="scatter_plot"
-          />
-          <MetricCard
-            label="Pipeline Phase"
-            value={health ? `Phase ${health.phase}` : "—"}
-            icon="dns"
-            dot={systemOk}
-          />
-        </section>
-
-        {/* Component health + ingestion zone */}
-        <div className="grid grid-cols-1 gap-xl lg:grid-cols-3">
-          {/* Component list */}
-          <div className="flex flex-col gap-md lg:col-span-2">
-            <div className="flex items-center justify-between">
-              <h3 className="font-headline-md text-headline-md text-on-surface">System Components</h3>
-              <Link
-                href="/settings"
-                className="flex items-center gap-xs font-label-md text-label-md text-primary-fixed-dim transition-colors hover:text-primary"
-              >
-                View Settings <MaterialIcon name="arrow_forward" size={16} />
-              </Link>
-            </div>
-            <div className="premium-card overflow-hidden rounded-xl">
-              {health ? (
-                health.components.map((comp, idx) => (
-                  <div
-                    key={comp.name}
-                    className={`flex items-start gap-md p-lg transition-colors hover:bg-surface-container-high/30 ${
-                      idx < health.components.length - 1 ? "border-b border-outline-variant/20" : ""
-                    }`}
-                  >
-                    <div className={`mt-1 h-2 w-2 flex-shrink-0 rounded-full ${STATE_DOT[comp.state] ?? "bg-outline"}`} />
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center justify-between gap-sm">
-                        <span className="font-label-md text-label-md text-on-surface capitalize">
-                          {comp.name.replace(/_/g, " ")}
-                        </span>
-                        <span className={`font-mono-sm text-[10px] uppercase tracking-wider ${STATE_COLOR[comp.state] ?? "text-on-surface-variant"}`}>
-                          {comp.state}
-                        </span>
-                      </div>
-                      <p className="mt-xs truncate font-mono-sm text-[11px] text-on-surface-variant/70">
-                        {comp.detail}
-                      </p>
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <div className="p-xl text-center">
-                  <div className="mx-auto mb-md h-8 w-8 animate-spin rounded-full border-2 border-outline-variant border-t-primary-fixed-dim" />
-                  <p className="font-body-md text-body-md text-on-surface-variant">Loading system status…</p>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Quick upload */}
-          <div className="flex flex-col gap-md">
-            <h3 className="font-headline-md text-headline-md text-on-surface">Quick Actions</h3>
-            <div className="premium-card flex h-full flex-col rounded-xl p-lg">
-              <p className="mb-lg font-body-md text-body-md text-on-surface-variant">
-                Upload documents for ingestion, transcription, and research.
-              </p>
-              <Link
-                href="/upload"
-                className="glass-dropzone flex min-h-[180px] flex-1 cursor-pointer flex-col items-center justify-center rounded-lg p-xl text-center"
-              >
-                <div className="mb-md flex h-12 w-12 items-center justify-center rounded-full bg-surface-container-high text-primary-fixed-dim shadow-inner">
-                  <MaterialIcon name="cloud_upload" size={24} />
-                </div>
-                <h4 className="mb-xs font-label-md text-label-md text-on-surface">Upload Documents</h4>
-                <p className="font-mono-sm text-mono-sm text-on-surface-variant">PDF and audio files</p>
-              </Link>
-              <div className="mt-md flex flex-col gap-sm">
-                <Link
-                  href="/research"
-                  className="flex items-center justify-center gap-sm rounded-lg border border-outline-variant/30 py-sm font-label-md text-label-md text-on-surface transition-colors hover:bg-surface-container-high"
-                >
-                  <MaterialIcon name="science" size={16} />
-                  New Research Query
-                </Link>
-                <Link
-                  href="/documents"
-                  className="flex items-center justify-center gap-sm rounded-lg border border-outline-variant/30 py-sm font-label-md text-label-md text-on-surface transition-colors hover:bg-surface-container-high"
-                >
-                  <MaterialIcon name="description" size={16} />
-                  View Knowledge Base
-                </Link>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <footer className="mt-auto flex w-full items-center justify-between border-t border-outline-variant/10 bg-surface-container-lowest px-xl py-md">
-        <span className="font-mono-sm text-mono-sm text-secondary-fixed-dim">
-          © 2024 OMERO Precision AI. Enterprise Research Platform.
-        </span>
-        <div className="hidden gap-lg md:flex">
-          <span className="font-mono-sm text-mono-sm text-on-surface-variant/60">Privacy Policy</span>
-          <span className="font-mono-sm text-mono-sm text-on-surface-variant/60">Terms of Service</span>
-          <span className="font-mono-sm text-mono-sm text-on-surface-variant/60">Security</span>
-        </div>
-      </footer>
-    </main>
-  );
+function ago(epochSeconds: number): string {
+  const seconds = Date.now() / 1000 - epochSeconds;
+  if (seconds < 60) return "just now";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} h ago`;
+  return new Date(epochSeconds * 1000).toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
-function MetricCard({
-  label,
-  value,
-  icon,
-  note,
-  dot
-}: {
-  label: string;
-  value: string;
-  icon: string;
-  note?: string;
-  dot?: boolean;
-}) {
+export default function HomePage() {
+  const [data, setData] = useState<Dashboard | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    getDashboard()
+      .then(setData)
+      .catch((err: Error) => setError(err.message));
+  }, []);
+
+  const empty = data !== null && data.documents.total === 0 && data.documents.archived === 0;
+  const usage = data?.usage;
+
   return (
-    <div className="premium-card flex flex-col rounded-lg p-lg">
-      <div className="mb-md flex items-center justify-between">
-        <span className="font-label-md text-label-md text-on-surface-variant">{label}</span>
-        <MaterialIcon name={icon} size={20} className="text-outline" />
+    <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-surface">
+      <TopBar searchPlaceholder="Search documents, projects, research..." />
+      <div className="flex-1 overflow-y-auto px-lg py-xl md:px-xl">
+        <div className="mx-auto flex max-w-6xl flex-col gap-xl">
+          <div className="flex flex-col justify-between gap-md md:flex-row md:items-end">
+            <div>
+              <h2 className="text-[30px] font-semibold tracking-tight text-on-surface">Workspace</h2>
+              <p className="mt-xs text-[16px] text-on-surface-variant">
+                {data
+                  ? `${data.documents.total} document${data.documents.total === 1 ? "" : "s"} and ${data.projects} active project${data.projects === 1 ? "" : "s"}.`
+                  : "Loading your workspace…"}
+              </p>
+            </div>
+            <div className="flex gap-sm">
+              <Link href="/upload" className="flex items-center gap-xs rounded-lg border border-outline-variant/40 px-md py-sm text-[14px] text-on-surface hover:bg-surface-container">
+                <MaterialIcon name="upload_file" size={18} /> Upload
+              </Link>
+              <Link href="/research" className="flex items-center gap-xs rounded-lg bg-primary-fixed-dim px-md py-sm text-[14px] font-semibold text-on-primary-fixed hover:opacity-90">
+                <MaterialIcon name="science" size={18} /> Ask a question
+              </Link>
+            </div>
+          </div>
+
+          {error ? <p role="alert" className="text-error">{error}</p> : null}
+
+          {empty ? (
+            <section className="rounded-2xl border border-outline-variant/30 bg-surface-container-low p-lg" aria-labelledby="start-heading">
+              <h3 id="start-heading" className="mb-md text-[19px] font-semibold text-on-surface">Getting started</h3>
+              <ol className="grid grid-cols-1 gap-md md:grid-cols-3">
+                {[
+                  ["Upload a document", "PDFs and recordings are read, split into passages and indexed.", "/upload"],
+                  ["Ask a question", "Answers cite the page or the moment in the recording they come from.", "/research"],
+                  ["Keep what matters", "Save answers to a project and generate a report from them.", "/projects"]
+                ].map(([title, text, href], i) => (
+                  <li key={title}>
+                    <Link href={href} className="flex h-full flex-col gap-xs rounded-xl border border-outline-variant/30 p-md hover:border-primary-fixed-dim/50">
+                      <span className="text-[13px] font-medium text-primary-fixed-dim">Step {i + 1}</span>
+                      <span className="text-[16px] font-semibold text-on-surface">{title}</span>
+                      <span className="text-[14px] leading-relaxed text-on-surface-variant">{text}</span>
+                    </Link>
+                  </li>
+                ))}
+              </ol>
+            </section>
+          ) : null}
+
+          {data ? (
+            <div className="grid grid-cols-1 gap-md sm:grid-cols-2 lg:grid-cols-4">
+              {STAT_TILES.map((tile) => (
+                <Link
+                  key={tile.key}
+                  href={tile.href}
+                  className="rounded-2xl border border-outline-variant/30 bg-surface-container-low p-md hover:border-primary-fixed-dim/50"
+                >
+                  <span className="block text-[13px] text-on-surface-variant">{tile.label}</span>
+                  <span className={`text-[28px] font-semibold ${tile.key === "failed" && data.documents.failed > 0 ? "text-error" : "text-on-surface"}`}>
+                    {data.documents[tile.key]}
+                  </span>
+                </Link>
+              ))}
+              <Link href="/projects" className="rounded-2xl border border-outline-variant/30 bg-surface-container-low p-md hover:border-primary-fixed-dim/50">
+                <span className="block text-[13px] text-on-surface-variant">Active projects</span>
+                <span className="text-[28px] font-semibold text-on-surface">{data.projects}</span>
+              </Link>
+            </div>
+          ) : null}
+
+          {data ? (
+            <div className="grid grid-cols-1 gap-xl lg:grid-cols-3">
+              <section aria-labelledby="recent-docs" className="flex flex-col gap-sm lg:col-span-2">
+                <div className="flex items-baseline justify-between">
+                  <h3 id="recent-docs" className="text-[17px] font-semibold text-on-surface">Recent uploads</h3>
+                  <Link href="/documents" className="text-[14px] text-primary-fixed-dim hover:underline">All documents</Link>
+                </div>
+                {data.recent_documents.length === 0 ? (
+                  <p className="text-[14px] text-on-surface-variant">Nothing uploaded yet.</p>
+                ) : (
+                  <ul className="divide-y divide-outline-variant/20 rounded-xl border border-outline-variant/30">
+                    {data.recent_documents.map((d) => (
+                      <li key={d.id} className="flex items-center justify-between gap-md px-md py-sm">
+                        <span className="min-w-0 truncate text-[15px] text-on-surface">{d.title}</span>
+                        <span className={`shrink-0 text-[13px] ${d.status === "failed" ? "text-error" : "text-on-surface-variant"}`}>
+                          {d.status === "ready" ? `Ready, ${ago(d.created_at)}` : d.status === "failed" ? "Failed" : "Processing"}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
+                <h3 className="mt-lg text-[17px] font-semibold text-on-surface">Your recent research</h3>
+                {data.recent_sessions.length === 0 ? (
+                  <p className="text-[14px] text-on-surface-variant">No questions asked yet.</p>
+                ) : (
+                  <ul className="flex flex-col gap-xs">
+                    {data.recent_sessions.map((s) => (
+                      <li key={s.id} className="flex items-baseline justify-between gap-md">
+                        <Link href={`/research?session=${s.id}`} className="min-w-0 truncate text-[15px] text-on-surface hover:text-primary-fixed-dim">
+                          {s.title}
+                        </Link>
+                        <span className="shrink-0 text-[13px] text-on-surface-variant">{ago(s.updated_at)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+
+              <aside className="flex flex-col gap-xl">
+                {usage ? (
+                  <section aria-labelledby="usage-heading" className="flex flex-col gap-sm">
+                    <h3 id="usage-heading" className="text-[17px] font-semibold text-on-surface">
+                      This month on the {usage.plan.name} plan
+                    </h3>
+                    {(["queries", "uploads"] as const).map((metric) => {
+                      const m = usage.metrics[metric];
+                      if (!m) return null;
+                      const pct = m.unlimited ? 0 : Math.min(100, m.percent);
+                      return (
+                        <div key={metric}>
+                          <div className="flex justify-between text-[14px]">
+                            <span className="capitalize text-on-surface-variant">{metric}</span>
+                            <span className="text-on-surface">{m.unlimited ? `${m.used} (unlimited)` : `${m.used} of ${m.limit}`}</span>
+                          </div>
+                          {!m.unlimited ? (
+                            <div className="mt-xs h-[6px] overflow-hidden rounded-full bg-surface-container-highest" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label={`${metric} used`}>
+                              <div className={`h-full rounded-full ${pct >= 90 ? "bg-error" : "bg-primary-fixed-dim"}`} style={{ width: `${pct}%` }} />
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                    <Link href="/usage" className="text-[14px] text-primary-fixed-dim hover:underline">Usage details</Link>
+                  </section>
+                ) : null}
+
+                <section aria-labelledby="activity-heading" className="flex flex-col gap-sm">
+                  <h3 id="activity-heading" className="text-[17px] font-semibold text-on-surface">Project activity</h3>
+                  {data.recent_activity.length === 0 ? (
+                    <p className="text-[14px] text-on-surface-variant">No project activity yet.</p>
+                  ) : (
+                    <ol className="flex flex-col gap-sm">
+                      {data.recent_activity.map((a) => (
+                        <li key={a.id} className="text-[14px] leading-snug">
+                          <Link href={`/projects/${a.project_id}`} className="text-on-surface hover:text-primary-fixed-dim">
+                            {describeActivity(a)}
+                          </Link>
+                          <span className="block text-[12px] text-on-surface-variant">
+                            {a.project_name ?? "Project"}, {ago(a.created_at)}
+                          </span>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                </section>
+              </aside>
+            </div>
+          ) : null}
+        </div>
       </div>
-      <div className="flex items-end gap-sm">
-        <span className="font-headline-lg text-headline-lg text-on-surface">{value}</span>
-        {note ? (
-          <span className="mb-1 font-mono-sm text-mono-sm text-primary-fixed-dim">{note}</span>
-        ) : null}
-        {dot ? (
-          <div className="mb-2 ml-1 h-2 w-2 rounded-full bg-primary-fixed-dim shadow-[0_0_8px_rgba(0,218,243,0.8)]" />
-        ) : null}
-      </div>
-    </div>
+    </main>
   );
 }

@@ -40,11 +40,11 @@ class RedisQueryCache:
         self._enabled = enabled
 
     @staticmethod
-    def compute_key(question: str, tenant_id: str, top_k: int, min_similarity: float) -> str:
+    def compute_key(question: str, tenant_id: str, top_k: int, min_similarity: float, document_ids=None) -> str:
         # Reuse the canonical key derivation so Redis and in-memory caches agree.
         from omni_modal.qa.cache import QueryCache  # noqa: PLC0415
 
-        return QueryCache.compute_key(question, tenant_id, top_k, min_similarity)
+        return QueryCache.compute_key(question, tenant_id, top_k, min_similarity, document_ids)
 
     def _entry_key(self, key: str) -> str:
         return f"{self._ns}:e:{key}"

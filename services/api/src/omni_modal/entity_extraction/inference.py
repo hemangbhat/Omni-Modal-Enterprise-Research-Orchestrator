@@ -32,6 +32,32 @@ class ExtractionPattern:
     confidence: float
 
 
+_SENTENCE_LABELS = frozenset({
+    EntityLabel.DECISION, EntityLabel.RISK, EntityLabel.ACTION_ITEM, EntityLabel.GOAL,
+})
+# Notes and transcripts are often unpunctuated: never let one entity grow past this.
+_MAX_SPAN = 300
+# A sentence ends at . ! or ? followed by space or the end, but not at a decimal point.
+_SENTENCE_END = re.compile(r"[.!?](?=\s|$)|\n")
+
+
+def _sentence_bounds(text: str, start: int, end: int) -> tuple[int, int]:
+    """The whole sentence around ``text[start:end]``, without surrounding spaces."""
+    left = 0
+    for m in _SENTENCE_END.finditer(text, 0, start):
+        left = m.end()
+    m = _SENTENCE_END.search(text, max(end - 1, start))
+    right = m.end() if m else len(text)
+    if right - left > _MAX_SPAN:
+        left = max(left, start - _MAX_SPAN // 3)
+        right = min(right, left + _MAX_SPAN)
+    while left < right and text[left].isspace():
+        left += 1
+    while right > left and text[right - 1].isspace():
+        right -= 1
+    return left, right
+
+
 class RuleBasedEnterpriseEntityExtractor:
     model_name = "rule-based-enterprise-entities"
     schema_version = "enterprise_entities.v1"
@@ -47,7 +73,7 @@ class RuleBasedEnterpriseEntityExtractor:
                 EntityLabel.KPI,
                 re.compile(
                     r"\b(?:KPI|ARR|NPS|SLA|MTTR|CSAT|conversion|retention|churn)"
-                    r"[^.:\n]*(?:\d+(?:\.\d+)?%?|\$[0-9,.]+)",
+                    r"(?:[^.:\n]|\.(?=\d))*(?:\d+(?:\.\d+)?%?|\$[0-9,.]+)",
                     re.IGNORECASE,
                 ),
                 0.68,
@@ -59,7 +85,7 @@ class RuleBasedEnterpriseEntityExtractor:
                     r"(?:Q[1-4]|Monday|Tuesday|Wednesday|Thursday|Friday|"
                     r"January|February|March|April|May|June|July|August|"
                     r"September|October|November|December|\d{1,2}/\d{1,2}/\d{2,4})"
-                    r"[^.:\n]*",
+                    r"(?:[^.:\n]|\.(?=\d))*",
                     re.IGNORECASE,
                 ),
                 0.7,
@@ -86,7 +112,7 @@ class RuleBasedEnterpriseEntityExtractor:
             ),
             ExtractionPattern(
                 EntityLabel.OWNER,
-                re.compile(r"\b(?:owner|owned by|DRI|accountable|assigned to)\b[^.:\n]*", re.IGNORECASE),
+                re.compile(r"\b(?:owner|owned by|DRI|accountable|assigned to)\b:?(?:[^.:\n]|\.(?=\d)){0,120}", re.IGNORECASE),
                 0.65,
             ),
         ]
@@ -103,18 +129,22 @@ class RuleBasedEnterpriseEntityExtractor:
 
         for extraction_pattern in self._patterns:
             for match in extraction_pattern.pattern.finditer(text):
-                key = (extraction_pattern.label, match.start(), match.end())
+                start, end = match.start(), match.end()
+                if extraction_pattern.label in _SENTENCE_LABELS:
+                    # A decision or risk is only meaningful as the whole sentence.
+                    start, end = _sentence_bounds(text, start, end)
+                key = (extraction_pattern.label, start, end)
                 if key in seen:
                     continue
                 seen.add(key)
-                value = match.group(0).strip()
+                value = text[start:end]
                 entities.append(
                     EntitySpan(
                         label=extraction_pattern.label,
                         text=value,
                         normalized_value=_normalize_value(value),
-                        start_char=match.start(),
-                        end_char=match.end(),
+                        start_char=start,
+                        end_char=end,
                         confidence=extraction_pattern.confidence,
                         evidence=_evidence_window(text, match.start(), match.end()),
                     )

@@ -148,11 +148,24 @@ class InMemoryChunkRetriever:
     ) -> None:
         self._provider = embedding_provider
         self._store = store
+        # Set by the app: False for documents that must not be searched (archived).
+        self.is_searchable = None
 
     def retrieve(self, request: QueryRequest) -> list[RetrievedChunk]:
+        scope = None if request.document_ids is None else set(request.document_ids)
+        if scope is not None and not scope:
+            return []
         query_embedding = self._provider.embed_query(request.question)
         scored: list[tuple[float, StoredChunk]] = []
+        allowed: dict[str, bool] = {}
         for chunk in self._store.for_tenant(request.tenant_id):
+            if scope is not None and chunk.document_id not in scope:
+                continue
+            if self.is_searchable is not None:
+                if chunk.document_id not in allowed:
+                    allowed[chunk.document_id] = bool(self.is_searchable(request.tenant_id, chunk.document_id))
+                if not allowed[chunk.document_id]:
+                    continue
             similarity = cosine_similarity(query_embedding, chunk.embedding)
             if request.min_similarity > 0 and similarity < request.min_similarity:
                 continue

@@ -9,6 +9,8 @@ ENDPOINT_ROLES: dict[str, frozenset[str]] = {
     # Deleting or reprocessing; the service also requires the uploader or an admin.
     "/documents/manage": frozenset({"researcher", "admin"}),
     "/projects":       frozenset({"researcher", "admin", "auditor"}),
+    # Creating and changing projects, findings, notes and reports.
+    "/projects/manage": frozenset({"researcher", "admin"}),
     "/archives":       frozenset({"researcher", "admin", "auditor"}),
     # Saved sessions are private to their owner; any role may keep its own.
     "/research/sessions": frozenset({"researcher", "admin", "auditor"}),
@@ -19,6 +21,7 @@ ENDPOINT_ROLES: dict[str, frozenset[str]] = {
     "/billing/checkout":     frozenset({"admin"}),
     "/billing/confirm":      frozenset({"admin"}),
     "/billing/portal":       frozenset({"admin"}),
+    "/admin/ingestion":      frozenset({"admin"}),
     # /entities/:id is a prefix route — checked by prefix match in assert_endpoint_roles
 }
 

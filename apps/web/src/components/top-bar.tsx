@@ -6,6 +6,7 @@ import Link from "next/link";
 import { MaterialIcon } from "@/components/material-icon";
 import { useAuth } from "@/components/auth-context";
 import { apiRequest } from "@/lib/api-client";
+import { searchWorkspace, type SearchResults } from "@/lib/workspace-api";
 import { decodeTokenPayload } from "@/lib/auth";
 import { getClientApiConfig } from "@/lib/env";
 import {
@@ -49,8 +50,35 @@ export function TopBar({ searchPlaceholder = "Search workspace..." }: TopBarProp
 
   const [search, setSearch] = useState("");
   const [openMenu, setOpenMenu] = useState<
-    null | "notifications" | "status" | "profile" | "workspace"
+    null | "notifications" | "status" | "profile" | "workspace" | "search"
   >(null);
+  const [results, setResults] = useState<SearchResults | null>(null);
+
+  // Search documents, projects and research as the user types (debounced).
+  useEffect(() => {
+    const term = search.trim();
+    if (term.length < 2) {
+      setResults(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      searchWorkspace(term)
+        .then((found) => {
+          if (!cancelled) {
+            setResults(found);
+            setOpenMenu("search");
+          }
+        })
+        .catch(() => {
+          if (!cancelled) setResults(null);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [search]);
   const [status, setStatus] = useState<BackendStatus>("checking");
   const [notes, setNotes] = useState<Notification[]>([]);
   const [unread, setUnread] = useState(0);
@@ -184,10 +212,58 @@ export function TopBar({ searchPlaceholder = "Search workspace..." }: TopBarProp
               submitSearch();
             }
           }}
+          onFocus={() => {
+            if (results) setOpenMenu("search");
+          }}
           placeholder={searchPlaceholder}
           aria-label="Search workspace"
+          aria-expanded={openMenu === "search" && results !== null}
+          aria-controls="workspace-search-results"
           className="w-full rounded-full border border-outline-variant/30 bg-surface-container py-1.5 pl-10 pr-4 font-body-md text-body-md text-on-surface transition-all placeholder:text-on-surface-variant/50 focus:border-primary-fixed-dim/50 focus:outline-none focus:ring-1 focus:ring-primary-fixed-dim/50"
         />
+        {openMenu === "search" && results ? (
+          <div
+            id="workspace-search-results"
+            className="absolute left-0 right-0 top-[calc(100%+6px)] z-50 max-h-[70vh] overflow-y-auto rounded-xl border border-outline-variant/30 bg-surface-container-low p-sm shadow-2xl"
+          >
+            {results.documents.length + results.projects.length + results.sessions.length === 0 ? (
+              <p className="px-sm py-xs text-[14px] text-on-surface-variant">Nothing matches.</p>
+            ) : (
+              (
+                [
+                  ["Documents", results.documents.map((d) => ({ key: d.id, label: d.title, href: `/documents?q=${encodeURIComponent(d.title)}` }))],
+                  ["Projects", results.projects.map((p) => ({ key: p.id, label: p.name, href: `/projects/${p.id}` }))],
+                  ["Your research", results.sessions.map((s) => ({ key: s.id, label: s.title, href: `/research?session=${s.id}` }))]
+                ] as const
+              ).map(([heading, rows]) =>
+                rows.length === 0 ? null : (
+                  <div key={heading} className="py-xs">
+                    <p className="px-sm text-[12px] font-medium text-on-surface-variant">{heading}</p>
+                    <ul>
+                      {rows.map((row) => (
+                        <li key={row.key}>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setOpenMenu(null);
+                              router.push(row.href);
+                            }}
+                            className="w-full truncate rounded-md px-sm py-xs text-left text-[14px] text-on-surface hover:bg-surface-container-high"
+                          >
+                            {row.label}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )
+              )
+            )}
+            <p className="border-t border-outline-variant/20 px-sm pt-xs text-[12px] text-on-surface-variant/70">
+              Searches {results.scope.charAt(0).toLowerCase() + results.scope.slice(1)}
+            </p>
+          </div>
+        ) : null}
       </div>
 
       <div className="flex items-center gap-md">

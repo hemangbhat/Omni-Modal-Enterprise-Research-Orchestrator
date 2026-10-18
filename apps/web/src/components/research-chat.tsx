@@ -1,9 +1,19 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { AnswerMarkdown } from "@/components/answer-markdown";
 import { EvidenceCard } from "@/components/evidence-card";
 import { MaterialIcon } from "@/components/material-icon";
+import { ReportViewer } from "@/components/report-viewer";
+import {
+  addProjectItem,
+  createSessionReport,
+  listProjects,
+  setSessionProject,
+  type ProjectListEntry,
+  type Report
+} from "@/lib/projects-api";
 import { captureQueryError } from "@/lib/api-client";
 import {
   ApiRequestError,
@@ -69,6 +79,11 @@ export function ResearchChat() {
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
   const [showSessions, setShowSessions] = useState(false);
+  // Which documents research searches: a project's, or all (null).
+  const [projectId, setProjectId] = useState<string | null>(null);
+  const [projects, setProjects] = useState<ProjectListEntry[]>([]);
+  const [report, setReport] = useState<Report | null>(null);
+  const [headerError, setHeaderError] = useState<string | null>(null);
   const threadEnd = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -85,7 +100,23 @@ export function ResearchChat() {
 
   useEffect(() => {
     void refreshSessions();
+    listProjects()
+      .then(setProjects)
+      .catch(() => setProjects([]));
   }, [refreshSessions]);
+
+  // Links from elsewhere: /research?project=ID starts research in a project,
+  // /research?session=ID opens a saved session. Also applies when a link is
+  // followed while already on this page.
+  const searchParams = useSearchParams();
+  const sessionParam = searchParams?.get("session") ?? null;
+  const projectParam = searchParams?.get("project") ?? null;
+  useEffect(() => {
+    if (sessionParam) void openSession(sessionParam);
+    else if (projectParam) setProjectId(projectParam);
+    // Reacts to the address only, not to openSession's identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionParam, projectParam]);
 
   useEffect(() => {
     threadEnd.current?.scrollIntoView({ block: "end", behavior: "smooth" });
@@ -102,7 +133,9 @@ export function ResearchChat() {
     setSelected(-1);
     setActiveCitation(null);
     try {
-      setTurns(turnsFrom(await getSession(id)));
+      const detail = await getSession(id);
+      setProjectId(detail.project_id ?? null);
+      setTurns(turnsFrom(detail));
     } catch (err) {
       setSessionsError(err instanceof Error ? err.message : "Could not open this research.");
       setActiveId(null);
@@ -151,7 +184,7 @@ export function ResearchChat() {
             citations: done.citations ?? [],
             streaming: false
           })
-      });
+      }, projectId);
     } catch (err) {
       const status = err instanceof ApiRequestError ? err.status : "network_error";
       captureQueryError({ query_length: question.length, http_status: status === 0 ? "network_error" : status });
@@ -175,6 +208,32 @@ export function ResearchChat() {
   }
 
   const activeTitle = sessions.find((s) => s.id === activeId)?.title;
+  const activeProject = projects.find((p) => p.id === projectId) ?? null;
+
+  async function changeScope(value: string) {
+    const next = value || null;
+    setHeaderError(null);
+    if (activeId) {
+      try {
+        await setSessionProject(activeId, next);
+      } catch (err) {
+        setHeaderError(err instanceof Error ? err.message : "The research scope could not be changed.");
+        return;
+      }
+      void refreshSessions();
+    }
+    setProjectId(next);
+  }
+
+  async function makeReport() {
+    if (!activeId) return;
+    setHeaderError(null);
+    try {
+      setReport(await createSessionReport(activeId));
+    } catch (err) {
+      setHeaderError(err instanceof Error ? err.message : "The report could not be created.");
+    }
+  }
 
   return (
     <div className="flex h-[calc(100vh-4rem)] w-full md:h-screen">
@@ -238,10 +297,38 @@ export function ResearchChat() {
           >
             <MaterialIcon name={showSessions ? "close" : "history"} size={20} />
           </button>
-          <h1 className="truncate font-headline-md text-[18px] font-semibold text-on-surface">
+          <h1 className="min-w-0 flex-1 truncate font-headline-md text-[18px] font-semibold text-on-surface">
             {activeTitle ?? (turns.length ? turns[0].question : "Research")}
           </h1>
+          <label className="sr-only" htmlFor="research-scope">Documents to search</label>
+          <select
+            id="research-scope"
+            value={projectId ?? ""}
+            disabled={busy}
+            onChange={(e) => void changeScope(e.target.value)}
+            className="max-w-[220px] shrink-0 rounded-lg border border-outline-variant/40 bg-surface px-sm py-xs text-[13px] text-on-surface"
+          >
+            <option value="">All documents</option>
+            {projectId && !activeProject ? <option value={projectId}>This project</option> : null}
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>Project: {p.name}</option>
+            ))}
+          </select>
+          {activeId && turns.some((t) => !t.streaming && t.answer) ? (
+            <button
+              type="button"
+              onClick={() => void makeReport()}
+              disabled={busy}
+              title={projectId ? "The report is saved to the project, so everyone in it can see it." : "Make a report from this session."}
+              className="hidden shrink-0 items-center gap-xs rounded-lg border border-outline-variant/40 px-sm py-xs text-[13px] text-on-surface hover:bg-surface-container disabled:opacity-50 sm:flex"
+            >
+              <MaterialIcon name="description" size={16} /> Report
+            </button>
+          ) : null}
         </div>
+        {headerError ? (
+          <p role="alert" className="border-b border-outline-variant/15 px-lg py-xs text-[13px] text-error">{headerError}</p>
+        ) : null}
 
         <div className="flex-1 overflow-y-auto px-lg pb-[180px] pt-xl md:px-xl">
           <div className="mx-auto flex max-w-[720px] flex-col gap-[56px]">
@@ -261,6 +348,8 @@ export function ResearchChat() {
                     setActiveCitation(null);
                   }}
                   onCite={(n) => cite(i, n)}
+                  saveTargets={activeProject ? [activeProject] : projects}
+                  sessionId={activeId}
                 />
               ))
             )}
@@ -306,7 +395,9 @@ export function ResearchChat() {
               </button>
             </div>
             <p className="mt-xs px-sm text-[12px] text-on-surface-variant/60">
-              Answers use only your workspace&apos;s documents. Follow-ups remember this conversation.
+              {activeProject
+                ? `Answers use only the documents in ${activeProject.name}. Follow-ups remember this conversation.`
+                : "Answers use only your workspace's documents. Follow-ups remember this conversation."}
             </p>
           </form>
         </div>
@@ -333,6 +424,7 @@ export function ResearchChat() {
               : null}
         </div>
       </aside>
+      {report ? <ReportViewer report={report} onClose={() => setReport(null)} /> : null}
     </div>
   );
 }
@@ -369,13 +461,17 @@ function TurnView({
   selected,
   activeCitation,
   onSelect,
-  onCite
+  onCite,
+  saveTargets = [],
+  sessionId = null
 }: {
   turn: Turn;
   selected: boolean;
   activeCitation: number | null;
   onSelect: () => void;
   onCite: (n: number) => void;
+  saveTargets?: ProjectListEntry[];
+  sessionId?: string | null;
 }) {
   const body = answerBody(turn.answer);
   const noData = turn.status === "no_data";
@@ -427,6 +523,9 @@ function TurnView({
           <span className="ml-xs inline-block h-4 w-[3px] animate-pulse bg-primary-fixed-dim align-middle" />
         ) : null}
       </div>
+      {!turn.streaming && !turn.error && turn.status === "answered" && saveTargets.length > 0 ? (
+        <SaveToProject turn={turn} targets={saveTargets} sessionId={sessionId} />
+      ) : null}
       {/* Evidence inline on screens without the side column */}
       {turn.citations.length > 0 ? (
         <details className="xl:hidden">
@@ -554,6 +653,77 @@ function SessionRow({
         </div>
       )}
       {error ? <p className="px-md pb-sm text-[12px] text-error">{error}</p> : null}
+    </div>
+  );
+}
+
+function SaveToProject({
+  turn,
+  targets,
+  sessionId
+}: {
+  turn: Turn;
+  targets: ProjectListEntry[];
+  sessionId: string | null;
+}) {
+  const [target, setTarget] = useState(targets.length === 1 ? targets[0].id : "");
+  const [state, setState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [message, setMessage] = useState("");
+
+  async function save() {
+    if (!target) return;
+    setState("saving");
+    try {
+      await addProjectItem(target, {
+        kind: "finding",
+        title: turn.question,
+        body: turn.answer,
+        citations: turn.citations,
+        source_session_id: sessionId
+      });
+      setState("saved");
+      setMessage(`Saved to ${targets.find((t) => t.id === target)?.name ?? "the project"}.`);
+    } catch (err) {
+      setState("error");
+      setMessage(err instanceof Error ? err.message : "It could not be saved.");
+    }
+  }
+
+  if (state === "saved") {
+    return (
+      <p className="flex items-center gap-xs text-[13px] text-primary-fixed-dim" role="status">
+        <MaterialIcon name="check" size={16} /> {message}
+      </p>
+    );
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-sm text-[13px]">
+      {targets.length > 1 ? (
+        <>
+          <label className="sr-only" htmlFor={`save-${turn.key}`}>Project to save this answer to</label>
+          <select
+            id={`save-${turn.key}`}
+            value={target}
+            onChange={(e) => setTarget(e.target.value)}
+            className="rounded-lg border border-outline-variant/40 bg-surface px-sm py-xs text-on-surface"
+          >
+            <option value="">Save to project…</option>
+            {targets.map((t) => (
+              <option key={t.id} value={t.id}>{t.name}</option>
+            ))}
+          </select>
+        </>
+      ) : null}
+      <button
+        type="button"
+        disabled={!target || state === "saving"}
+        onClick={() => void save()}
+        className="flex items-center gap-xs rounded-lg border border-outline-variant/40 px-sm py-xs text-on-surface hover:bg-surface-container disabled:opacity-40"
+      >
+        <MaterialIcon name="bookmark_add" size={16} />
+        {state === "saving" ? "Saving…" : targets.length === 1 ? `Save to ${targets[0].name}` : "Save"}
+      </button>
+      {state === "error" ? <span role="alert" className="text-error">{message}</span> : null}
     </div>
   );
 }

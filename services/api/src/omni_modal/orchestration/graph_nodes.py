@@ -277,7 +277,9 @@ class WebResearchNode:
             state.add_trace("web_research", "skipped", "Not needed or not allowed for this question.")
             return None
         if self._client is None:
-            return self._note(state, "no web search provider is configured.")
+            # Web research is not set up on this server: nothing to tell the user.
+            state.add_trace("web_research", "skipped", "No web search provider is configured.")
+            return None
         internal = [c.content for c in state.retrieved_chunks]
         query, usable = external.redact_question(state.request.retrieval_text, internal)
         if not usable:

@@ -117,5 +117,18 @@ class FinalizeAnswerTests(unittest.TestCase):
         self.assertIn("[2]", resp.answer_markdown.split("## Sources", 1)[1])
 
 
+
+
+class LocatorCitationTests(unittest.TestCase):
+    """gpt-oss cites as 【n†L3-L5】; the passage number must survive."""
+
+    def test_locator_markers_keep_their_number(self) -> None:
+        from omni_modal.qa.citations import strip_invalid_markers  # noqa: PLC0415
+
+        text, cited = strip_invalid_markers("Compiled 【1†L3-L5】. Runs on the JVM【2†source】. Bad 【9†L1】.", 3)
+        self.assertEqual(text, "Compiled [1]. Runs on the JVM [2]. Bad.")
+        self.assertEqual(cited, {1, 2})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -22,7 +22,9 @@ SNIPPET_MAX = 300
 # One citation group: "[3]", "[1, 2]" or a run like "[1][2]", read together so
 # every number in a run is checked and renumbered.
 _MARKER = re.compile(r"[ \t]*(?<![\w\]])((?:\[\d{1,3}(?:[ \t]*,[ \t]*\d{1,3})*\])+)")
-_FULL_WIDTH = re.compile(r"[ \t]*【\s*(\d+(?:\s*,\s*\d+)*)\s*】")
+# Some models cite as 【1】, 【1, 2】 or with a locator after the number,
+# e.g. 【1†L3-L5】 (gpt-oss): the passage number is what counts.
+_FULL_WIDTH = re.compile(r"[ \t]*【\s*(\d+(?:\s*,\s*\d+)*)\s*(?:[†‡:|][^】]*)?】")
 # Anything else in those brackets (e.g. a tool name) is not a citation.
 _FULL_WIDTH_OTHER = re.compile(r"[ \t]*【[^】]*】")
 # Words too common to say which sentence answers the question.

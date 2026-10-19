@@ -106,7 +106,7 @@ export function parseBlocks(markdown: string): Block[] {
   };
   // Some models cite with full-width brackets (【1】) while streaming.
   const normalised = markdown
-    .replace(/\s*【\s*(\d+(?:\s*,\s*\d+)*)\s*】/g, " [$1]")
+    .replace(/\s*【\s*(\d+(?:\s*,\s*\d+)*)\s*(?:[†‡:|][^】]*)?】/g, " [$1]")
     .replace(/\s*【[^】]*】/g, "");
   for (const raw of normalised.split("\n")) {
     const line = raw.trimEnd();

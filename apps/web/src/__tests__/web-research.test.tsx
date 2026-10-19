@@ -102,3 +102,11 @@ describe("web research setting", () => {
     expect((screen.getByRole("link", { name: "Compare plans" })).getAttribute("href")).toBe("/pricing");
   });
 });
+
+describe("model citation formats", () => {
+  it("turns 【n†locator】 into a citation chip while streaming", () => {
+    render(<AnswerMarkdown markdown={"Bytecode is compiled 【1†L3-L5】."} citationCount={1} />);
+    expect(screen.getByRole("button", { name: "Show source 1" })).toBeTruthy();
+    expect(screen.queryByText(/†/)).toBeNull();
+  });
+});

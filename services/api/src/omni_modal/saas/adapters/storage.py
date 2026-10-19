@@ -34,6 +34,15 @@ def safe_download_name(file_name: str) -> str:
     return cleaned.strip() or "download"
 
 
+def s3_region() -> str | None:
+    """The bucket's region from S3_REGION, or the standard AWS variables."""
+    for name in ("S3_REGION", "AWS_REGION", "AWS_DEFAULT_REGION"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return None
+
+
 def content_disposition(file_name: str) -> str:
     """An attachment header that works for any file name: an ASCII fallback plus
     the exact UTF-8 name (RFC 6266), since headers themselves must be latin-1."""
@@ -140,12 +149,21 @@ class S3StorageAdapter:
     def __init__(self) -> None:
         import boto3  # type: ignore[import-not-found]  # noqa: PLC0415
 
+        from botocore.config import Config  # type: ignore[import-not-found]  # noqa: PLC0415
+
         self._bucket = os.environ["S3_BUCKET"]
         kwargs: dict[str, object] = {}
+        region = s3_region()
+        if region:
+            kwargs["region_name"] = region
         if os.environ.get("S3_ENDPOINT_URL"):
             kwargs["endpoint_url"] = os.environ["S3_ENDPOINT_URL"]
-        if os.environ.get("S3_REGION"):
-            kwargs["region_name"] = os.environ["S3_REGION"]
+        elif region:
+            # Browsers upload straight to S3. The global address answers buckets
+            # outside us-east-1 with a redirect, which a browser upload (and its
+            # CORS pre-check) cannot follow, so always use the bucket's region.
+            kwargs["endpoint_url"] = f"https://s3.{region}.amazonaws.com"
+            kwargs["config"] = Config(signature_version="s3v4", s3={"addressing_style": "virtual"})
         self._client = boto3.client("s3", **kwargs)
 
     def put(self, key: str, data: bytes) -> StoredObject:

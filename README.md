@@ -32,9 +32,12 @@ DeterministicAgentGraph
     ├── MissingDataDetectionNode
     ├── ExternalDelegationNode  ──→  HttpA2AResearchClient  ──→  External AI API
     ├── ExternalEvidenceMergeNode
-    ├── ReasoningSynthesisNode
+    ├── ReasoningSynthesisNode  ──→  Groq → Gemini → extractive, citations checked
+    ├── WebResearchNode         ──→  Tavily, only when the documents cannot answer and the workspace allows it
     └── ControlledFallbackNode
 ```
+
+Retrieval is hybrid by default: pgvector cosine search and Postgres full-text search, merged by reciprocal rank fusion. Presenting the project: `docs/portfolio/INTERVIEW_PREP.md`.
 
 **Key infrastructure:**
 

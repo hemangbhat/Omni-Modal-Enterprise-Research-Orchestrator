@@ -254,13 +254,15 @@ For browser uploads straight to S3, the bucket needs a CORS rule allowing `PUT` 
 | `POST /query/stream` | Answers a question as server-sent events: `session`, then `delta` events carrying model tokens as the provider sends them, then `done` with the checked answer and citations. Pass `session_id` to ask a follow-up; without it a new saved session is created |
 | `GET/POST /research/sessions`, `GET/PATCH/DELETE /research/sessions/{id}` | List, create, open, rename and delete saved conversations. Sessions are private to the user who made them; anyone else gets 404 |
 | `POST /assistant/stream` | The site-wide assistant. Same event stream, plus `tool` events naming what it looked up |
+| `GET/PUT /workspace/research-settings` | Whether questions the documents cannot answer may be searched on the web (admins change it), whether a provider is set up, whether the plan includes it, and this month's use |
 
 How an answer is built:
 
 - **Follow-ups.** Earlier turns are used to rewrite a follow-up ("and headcount?") into a standalone search query before retrieval. The model also sees the conversation. Without a model key, the previous question is prepended instead.
 - **Real streaming.** Groq and Gemini are called with their streaming APIs, so the first words appear while the rest is still being generated. The extractive fallback streams its finished text.
 - **Checked citations.** The model cites passages as `[n]`. Numbers outside the retrieved set are removed, each passage is marked cited or not, and each citation carries the document title, page number or audio time range, and the sentence that supports the claim.
-- **No guessing.** When the passages do not answer the question, the reply says so and carries no citations.
+- **No guessing.** When the passages do not answer the question, the reply says so and carries no citations. Without a model, a passage that shares no content word with the question is not quoted as evidence.
+- **Web research, only when needed and allowed.** If the documents cannot answer, and the workspace has turned web research on (Settings > Research, admins only, off by default) on a plan that includes it, the question is searched with Tavily. Only the question leaves, after removing email addresses, phone numbers, links, long numbers and any figures or four-word phrases that appear in the retrieved passages; a question with too little left is not sent. The web answer appears under its own heading, "Not in your documents — from the web", with each source labelled "From the web" and linked, and the exact search text shown. Limits: 10 searches an hour per workspace, 300 a month on Pro, 10-second timeout with two retries. When a search does not run, the answer says why.
 - **Assistant safety.** The assistant is read-only. Which tools run (search documents, list documents, usage and plan, team members, suggest a page) is decided by rules applied to the user's own message, not by the model, so text inside a document cannot trigger anything. Each tool applies the same role checks as the matching API endpoint, and tool output reaches the model marked as untrusted data. Without a model key it says so and shows what it found.
 
 Model defaults: `GROQ_MODEL=openai/gpt-oss-120b`, `GEMINI_MODEL=gemini-flash-latest`. Groq retired `llama-3.3-70b-versatile` and Google retired `gemini-2.0-flash`; with those names set, every request silently fell back to the extractive answer.
@@ -644,8 +646,8 @@ Internal document chunks must never leave the tenant security boundary. The `Red
 Audited on 2026-10-11 against the target product description. These are not built yet; the plan and order are in `docs/superpowers/specs/2026-10-11-omero-completion-design.md`.
 
 - **Research:** no reranker. Without a language model, the quoted snippet is chosen by word overlap and is sometimes not the sentence that answers (measured above as "supported citation").
-- **External research:** the delegation client is generic and off unless an endpoint is configured; no provider is wired.
-- **Plans:** the plan table defines feature flags (SSO, audit export, priority ingest, external delegation) that nothing enforces or implements yet, so the pricing and billing pages list only the enforced limits.
+- **Web research:** needs `TAVILY_API_KEY` (free plan). Gemini with Google Search grounding was the first choice, but it is not on the free tier for current Gemini models. Web results are not cached, and the older generic A2A delegation client is still present but off.
+- **Plans:** the web research feature and its monthly allowance are enforced; the other plan flags (SSO, audit export, priority ingest) are not implemented, so the pricing and billing pages list only what is enforced.
 - **Deployment:** the Render free tier runs the hashing embedder, which is not semantic.
 - **Frontend:** `npm run lint` is broken (`next lint` was removed in Next.js 16). The browser test covers one journey, not every page.
 - **Rate limits:** every signed-in request counts against a per-user limit (300 a minute) and per-tenant limit (1,200); questions, the assistant and uploads also count against a stricter one (20 and 60). Set with `RATE_LIMIT_*` variables.

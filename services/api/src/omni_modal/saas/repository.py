@@ -71,10 +71,11 @@ class PostgresWorkspaceStore:
             id=row[0], tenant_id=row[1], name=row[2], plan_id=row[3],
             owner_user_id=row[4], stripe_customer_id=row[5],
             stripe_subscription_id=row[6], created_at=float(row[7]),
+            external_research_enabled=bool(row[8]),
         )
 
     _ORG_COLS = ("id, tenant_id, name, plan_id, owner_user_id, "
-                 "stripe_customer_id, stripe_subscription_id, created_at")
+                 "stripe_customer_id, stripe_subscription_id, created_at, external_research_enabled")
 
     def get_org(self, org_id: str) -> Organization | None:
         with self._conn() as conn, conn.cursor() as cur:
@@ -100,6 +101,12 @@ class PostgresWorkspaceStore:
     def set_plan(self, org_id: str, plan_id: str) -> Organization | None:
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute("UPDATE organizations SET plan_id = %s WHERE id = %s", (plan_id, org_id))
+        return self.get_org(org_id)
+
+    def set_external_research(self, org_id: str, enabled: bool) -> Organization | None:
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE organizations SET external_research_enabled = %s WHERE id = %s",
+                        (bool(enabled), org_id))
         return self.get_org(org_id)
 
     def set_stripe_ids(

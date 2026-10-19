@@ -15,6 +15,7 @@ from omni_modal.orchestration.graph_nodes import (
     MissingDataDetectionNode,
     ReasoningSynthesisNode,
     ValidateRequestNode,
+    WebResearchNode,
 )
 from omni_modal.orchestration.a2a import (
     DisabledExternalResearchClient,
@@ -187,6 +188,7 @@ class InternalResearchAdkWorkflow:
         retriever: ChunkRetriever,
         external_client: ExternalResearchClient | None = None,
         synthesizer=None,
+        web_search=None,
     ) -> None:
         client = external_client or DisabledExternalResearchClient()
         self._graph = DeterministicAgentGraph(
@@ -197,6 +199,7 @@ class InternalResearchAdkWorkflow:
                 ExternalDelegationNode(client),
                 ExternalEvidenceMergeNode(),
                 ReasoningSynthesisNode(synthesizer),
+                WebResearchNode(web_search, synthesizer),
                 ControlledFallbackNode(),
             ]
         )

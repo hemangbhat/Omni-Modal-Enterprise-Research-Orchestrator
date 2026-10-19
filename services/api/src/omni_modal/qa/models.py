@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import Literal
 
@@ -24,6 +25,8 @@ class SourceReference:
     scope: str = "internal"
     # Whether the answer text actually cites this passage.
     cited: bool = False
+    # Link to the page, for external (web) sources.
+    url: str | None = None
 
     def citation_label(self, index: int) -> str:
         location = ""
@@ -83,6 +86,9 @@ class QueryRequest:
     search_query: str | None = None
     # Limit retrieval to these documents (a project). None means every document.
     document_ids: tuple[str, ...] | None = None
+    # Asked only when the documents cannot answer: returns None when a web search
+    # may run (and counts it), or the reason it may not. None here means never.
+    external_permit: Callable[[], str | None] | None = field(default=None, compare=False, hash=False, repr=False)
 
     @property
     def retrieval_text(self) -> str:

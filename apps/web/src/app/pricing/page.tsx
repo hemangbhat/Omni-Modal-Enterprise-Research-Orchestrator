@@ -11,12 +11,14 @@ import type { Plan } from "@/lib/saas-api";
 const ROWS: { label: string; value: (p: Plan) => number; unit: string }[] = [
   { label: "Research questions", value: (p) => p.monthly_query_limit, unit: "a month" },
   { label: "Document uploads", value: (p) => p.monthly_upload_limit, unit: "a month" },
+  { label: "Web searches when documents lack the answer", value: (p) => p.monthly_external_research_limit ?? 0, unit: "a month" },
   { label: "Workspaces", value: (p) => p.max_workspaces, unit: "" },
   { label: "Team members", value: (p) => p.max_members, unit: "" }
 ];
 
 function amount(value: number, unit: string): string {
   if (value < 0) return "Unlimited";
+  if (value === 0) return "Not included";
   return `${value.toLocaleString()}${unit ? ` ${unit}` : ""}`;
 }
 

@@ -21,6 +21,7 @@ export type Plan = {
   monthly_query_limit: number;
   monthly_upload_limit: number;
   storage_mb: number;
+  monthly_external_research_limit?: number;
   features: string[];
 };
 

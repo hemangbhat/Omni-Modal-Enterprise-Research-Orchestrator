@@ -4,9 +4,10 @@ import { Fragment, type ReactNode } from "react";
 
 /**
  * Renders the small Markdown subset model answers use (headings, lists,
- * bold, inline code, paragraphs) without HTML injection: everything is
- * rendered as React text. Citation markers like [2] or [1, 3] become buttons
- * that point at the matching evidence card.
+ * bold, inline code, paragraphs, http(s) links) without HTML injection:
+ * everything is rendered as React text. Citation markers like [2] or [1, 3]
+ * become buttons that point at the matching evidence card. Links open in a
+ * new tab without giving the page access to this one.
  */
 type Props = {
   markdown: string;
@@ -15,13 +16,28 @@ type Props = {
   onCite?: (n: number) => void;
 };
 
-const INLINE = /(\*\*[^*]+\*\*|\*[^*\s][^*]*\*|`[^`]+`|\[\d+(?:\s*,\s*\d+)*\])/g;
+const INLINE = /(\[[^\]\n]+\]\(https?:\/\/[^\s)]+\)|\*\*[^*]+\*\*|\*[^*\s][^*]*\*|`[^`]+`|\[\d+(?:\s*,\s*\d+)*\])/g;
+const LINK = /^\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)$/;
 
 function Inline({ text, citationCount, activeCitation, onCite }: Omit<Props, "markdown"> & { text: string }) {
   const parts = text.split(INLINE).filter((p) => p !== "");
   return (
     <>
       {parts.map((part, i) => {
+        const link = LINK.exec(part);
+        if (link) {
+          return (
+            <a
+              key={i}
+              href={link[2]}
+              target="_blank"
+              rel="noopener noreferrer nofollow"
+              className="text-primary-fixed-dim underline decoration-primary-fixed-dim/40 underline-offset-2 hover:decoration-primary-fixed-dim"
+            >
+              {link[1]}
+            </a>
+          );
+        }
         if (part.startsWith("**") && part.endsWith("**")) {
           return (
             <strong key={i} className="font-semibold text-on-surface">

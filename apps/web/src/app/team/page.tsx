@@ -110,9 +110,11 @@ export default function TeamPage() {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="teammate@company.com"
+                  aria-label="Email address to invite"
                   className="flex-1 rounded-lg border border-outline-variant/30 bg-surface-container px-md py-sm font-body-md text-body-md text-on-surface placeholder:text-on-surface-variant/50 focus:border-primary-fixed-dim/50 focus:outline-none focus:ring-1 focus:ring-primary-fixed-dim/50"
                 />
                 <select
+                  aria-label="Role for the new member"
                   value={role}
                   onChange={(e) => setRole(e.target.value)}
                   className="rounded-lg border border-outline-variant/30 bg-surface-container px-md py-sm font-body-md text-body-md capitalize text-on-surface focus:border-primary-fixed-dim/50 focus:outline-none"

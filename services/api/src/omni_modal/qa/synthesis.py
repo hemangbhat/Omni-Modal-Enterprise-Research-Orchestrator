@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from omni_modal.qa.citations import best_excerpt
+from omni_modal.qa.citations import best_excerpt, no_data_response
+from omni_modal.qa.lexical import terms
 from omni_modal.qa.models import QueryRequest, QueryResponse, RetrievedChunk
 
 
@@ -26,6 +27,11 @@ class ExtractiveAnswerSynthesizer:
             )
 
         query = request.retrieval_text
+        # Without a model, a passage that shares no content word with the question
+        # is not evidence for it: say so instead of quoting unrelated text.
+        wanted = set(terms(query))
+        if wanted and not any(wanted & set(terms(chunk.content)) for chunk in chunks):
+            return no_data_response(request, chunks)
         bullets = []
         citations = []
         for index, chunk in enumerate(chunks, start=1):

@@ -8,6 +8,7 @@ vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(window.location.search),
   useParams: () => ({})
 }));
+vi.mock("@/lib/use-claims", () => ({ useClaims: () => ({ tenant_id: "t1", user_id: "u1", roles: ["admin"] }) }));
 vi.mock("@/components/auth-context", () => ({
   useAuth: () => ({ token: null, isReady: true, isAuthenticated: true, signIn: vi.fn(), signOut: vi.fn() })
 }));
@@ -39,12 +40,18 @@ describe("Dashboard", () => {
     vi.stubGlobal("fetch", async (url: string) => {
       if (url.includes("/dashboard")) {
         return json({ documents: { ready: 0, processing: 0, uploaded: 0, failed: 0, archived: 0, total: 0 },
-                      projects: 0, recent_documents: [], recent_sessions: [], recent_activity: [], usage });
+                      projects: 0, recent_documents: [], recent_sessions: [], recent_activity: [], usage,
+                      progress: { uploaded: true, asked: false, project: false, report: false } });
       }
       return json({});
     });
     render(<HomePage />);
     expect(await screen.findByText("Getting started")).toBeTruthy();
+    expect(screen.getByText("1 of 4 done. Next: ask a question.")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Upload a document (done)" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Hide" }));
+    expect(screen.queryByText("Getting started")).toBeNull();
+    expect(window.localStorage.getItem("omero.firstRun.dismissed.u1")).toBe("1");
     expect(screen.getByText("0 documents and 0 active projects.")).toBeTruthy();
     expect(screen.getByText("3 of 100")).toBeTruthy();
   });

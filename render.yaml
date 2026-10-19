@@ -19,6 +19,10 @@ services:
       - key: GROQ_API_KEY
         sync: false   # free at console.groq.com
 
+      # ── Web research (optional) ──────────────────────────────────────────
+      - key: TAVILY_API_KEY
+        sync: false   # free plan at app.tavily.com; leave empty to keep web research off
+
       - key: GROQ_MODEL
         value: openai/gpt-oss-120b
 
@@ -101,6 +105,8 @@ services:
       - key: DATABASE_URL
         sync: false
       - key: GROQ_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
         sync: false
       - key: GROQ_MODEL
         value: openai/gpt-oss-120b

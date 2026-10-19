@@ -20,6 +20,8 @@ export type Citation = {
   snippet: string;
   scope: string;
   cited: boolean;
+  // Link to the page, for external (web) sources.
+  url?: string | null;
 };
 
 export type SessionKind = "research" | "assistant";

@@ -157,7 +157,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           })}
 
           <li className="my-sm px-md">
-            <span className="font-mono-sm text-[10px] uppercase tracking-wider text-on-surface-variant/50">
+            <span className="font-mono-sm text-[11px] uppercase tracking-wider text-on-surface-variant">
               Manage
             </span>
           </li>
@@ -208,7 +208,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       </nav>
 
       {/* Main column */}
-      <div className="flex min-h-screen flex-1 flex-col md:ml-[240px]">
+      <div className="flex min-h-screen min-w-0 flex-1 flex-col overflow-x-clip md:ml-[240px]">
         {/* Mobile top bar */}
         <header className="sticky top-0 z-50 flex h-16 w-full items-center justify-between border-b border-outline-variant/30 bg-surface/80 px-lg shadow-sm backdrop-blur-xl md:hidden">
           <h1 className="font-headline-md text-headline-md font-bold tracking-tight text-on-surface">

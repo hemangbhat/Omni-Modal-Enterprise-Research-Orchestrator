@@ -13,6 +13,7 @@ import type { UsageReport } from "@/lib/saas-api";
 export type Dashboard = {
   documents: { ready: number; processing: number; uploaded: number; failed: number; archived: number; total: number };
   projects: number;
+  progress?: { uploaded: boolean; asked: boolean; project: boolean; report: boolean };
   recent_documents: DocumentRecord[];
   recent_sessions: SessionSummary[];
   recent_activity: (ActivityEntry & { project_id: string; project_name: string | null })[];
@@ -40,11 +41,21 @@ export type Invoice = {
 
 export type Failure = { document: DocumentRecord; job: JobRecord | null };
 
-async function call<T>(path: string, method = "GET"): Promise<T> {
+export type ResearchSettings = {
+  external_research_enabled: boolean;
+  provider_configured: boolean;
+  plan_includes: boolean;
+  monthly_limit: number;
+  used_this_month: number;
+};
+
+async function call<T>(path: string, method = "GET", body?: unknown): Promise<T> {
   const { baseUrl, token } = getClientApiConfig();
+  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+  if (body !== undefined) headers["Content-Type"] = "application/json";
   const res = await apiRequest(
     path,
-    { method, headers: token ? { Authorization: `Bearer ${token}` } : {} },
+    { method, headers, body: body === undefined ? undefined : JSON.stringify(body) },
     { baseUrl }
   );
   if (!res.ok) {
@@ -58,6 +69,9 @@ export const getDashboard = () => call<Dashboard>("/dashboard");
 export const searchWorkspace = (q: string) => call<SearchResults>(`/search?q=${encodeURIComponent(q)}`);
 export const getInvoices = () => call<{ available: boolean; invoices: Invoice[] }>("/billing/invoices");
 export const getFailures = () => call<{ failures: Failure[] }>("/admin/ingestion/failures");
+export const getResearchSettings = () => call<ResearchSettings>("/workspace/research-settings");
+export const setExternalResearch = (enabled: boolean) =>
+  call<ResearchSettings>("/workspace/research-settings", "PUT", { external_research_enabled: enabled });
 export const retryFailure = (documentId: string) =>
   call<{ job: JobRecord }>(`/admin/ingestion/failures/${encodeURIComponent(documentId)}/retry`, "POST");
 

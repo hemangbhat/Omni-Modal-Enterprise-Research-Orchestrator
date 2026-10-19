@@ -154,6 +154,19 @@ export function UploadDropzone() {
   return (
     <div className="grid grid-cols-1 gap-gutter lg:grid-cols-12">
       <div className="space-y-md lg:col-span-6">
+        <input
+          ref={inputRef}
+          type="file"
+          multiple
+          accept={Array.from(ALLOWED_EXTENSIONS).join(",")}
+          className="sr-only"
+          tabIndex={-1}
+          aria-label="Choose files to upload"
+          onChange={(event) => {
+            handleFiles(event.target.files);
+            event.target.value = "";
+          }}
+        />
         <button
           type="button"
           onClick={() => inputRef.current?.click()}
@@ -173,17 +186,7 @@ export function UploadDropzone() {
               : "border-outline-variant/60 bg-surface-container-low/60 hover:border-primary-fixed-dim/60"
           }`}
         >
-          <input
-            ref={inputRef}
-            type="file"
-            multiple
-            accept={Array.from(ALLOWED_EXTENSIONS).join(",")}
-            className="sr-only"
-            onChange={(event) => {
-              handleFiles(event.target.files);
-              event.target.value = "";
-            }}
-          />
+
           <MaterialIcon name="upload_file" size={40} className="mb-md text-primary-fixed-dim" />
           <span className="mb-xs text-[19px] font-semibold text-on-surface">Drop PDFs or recordings here</span>
           <span className="mb-lg max-w-sm text-[15px] leading-relaxed text-on-surface-variant">

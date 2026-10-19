@@ -194,9 +194,9 @@ export function TopBar({ searchPlaceholder = "Search workspace..." }: TopBarProp
   return (
     <header
       ref={containerRef}
-      className="sticky top-0 z-40 flex h-16 w-full items-center justify-between border-b border-outline-variant/20 bg-surface/80 px-lg backdrop-blur-md md:px-xl"
+      className="sticky top-0 z-40 flex h-16 w-full items-center justify-between gap-sm border-b border-outline-variant/20 bg-surface/80 px-md backdrop-blur-md sm:px-lg md:px-xl"
     >
-      <div className="relative w-full max-w-md">
+      <div className="relative min-w-0 max-w-md flex-1">
         <MaterialIcon
           name="search"
           size={18}
@@ -216,6 +216,8 @@ export function TopBar({ searchPlaceholder = "Search workspace..." }: TopBarProp
             if (results) setOpenMenu("search");
           }}
           placeholder={searchPlaceholder}
+          role="combobox"
+          aria-autocomplete="list"
           aria-label="Search workspace"
           aria-expanded={openMenu === "search" && results !== null}
           aria-controls="workspace-search-results"
@@ -266,7 +268,7 @@ export function TopBar({ searchPlaceholder = "Search workspace..." }: TopBarProp
         ) : null}
       </div>
 
-      <div className="flex items-center gap-md">
+      <div className="flex shrink-0 items-center gap-xs sm:gap-md">
         {/* Workspace switcher */}
         {workspaces.length > 0 ? (
           <div className="relative">
@@ -282,13 +284,13 @@ export function TopBar({ searchPlaceholder = "Search workspace..." }: TopBarProp
               aria-expanded={openMenu === "workspace"}
             >
               <MaterialIcon name="workspaces" size={16} className="text-primary-fixed-dim" />
-              <span className="max-w-[140px] truncate font-label-md text-label-md text-on-surface">
+              <span className="hidden max-w-[140px] truncate font-label-md text-label-md text-on-surface sm:inline">
                 {workspaces.find((w) => w.id === activeWorkspace)?.name ?? "Workspace"}
               </span>
-              <MaterialIcon name="expand_more" size={16} className="text-on-surface-variant" />
+              <MaterialIcon name="expand_more" size={16} className="hidden text-on-surface-variant sm:inline" />
             </button>
             {openMenu === "workspace" ? (
-              <div className="absolute left-0 top-12 z-50 w-64 overflow-hidden rounded-2xl border border-outline-variant/20 bg-surface-container-low shadow-[0_12px_40px_rgba(0,0,0,0.4)] backdrop-blur-xl">
+              <div className="absolute right-0 top-12 z-50 w-64 max-w-[calc(100vw-2rem)] overflow-hidden sm:left-0 sm:right-auto rounded-2xl border border-outline-variant/20 bg-surface-container-low shadow-[0_12px_40px_rgba(0,0,0,0.4)] backdrop-blur-xl">
                 <PopoverHeader icon="workspaces" title="Workspaces" />
                 <div className="flex flex-col py-xs">
                   {workspaces.map((w) => (
@@ -402,8 +404,8 @@ export function TopBar({ searchPlaceholder = "Search workspace..." }: TopBarProp
           ) : null}
         </div>
 
-        {/* Live backend status */}
-        <div className="relative">
+        {/* Live backend status (also on the Settings page; hidden on phones for space) */}
+        <div className="relative hidden sm:block">
           <button
             type="button"
             onClick={() => setOpenMenu((m) => (m === "status" ? null : "status"))}

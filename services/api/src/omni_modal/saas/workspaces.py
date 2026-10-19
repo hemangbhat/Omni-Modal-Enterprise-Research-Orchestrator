@@ -48,6 +48,8 @@ class Organization:
     created_at: float
     stripe_customer_id: str | None = None
     stripe_subscription_id: str | None = None
+    # Questions the documents cannot answer may be searched on the web (0015).
+    external_research_enabled: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -59,6 +61,7 @@ class Organization:
             "created_at": self.created_at,
             "stripe_customer_id": self.stripe_customer_id,
             "stripe_subscription_id": self.stripe_subscription_id,
+            "external_research_enabled": self.external_research_enabled,
         }
 
 
@@ -180,6 +183,14 @@ class WorkspaceStore:
             if org is None:
                 return None
             org.plan_id = plan_id
+            return org
+
+    def set_external_research(self, org_id: str, enabled: bool) -> Organization | None:
+        with self._lock:
+            org = self._orgs.get(org_id)
+            if org is None:
+                return None
+            org.external_research_enabled = bool(enabled)
             return org
 
     def set_stripe_ids(

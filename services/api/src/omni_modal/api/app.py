@@ -371,10 +371,17 @@ _model_status_lock = threading.Lock()
 
 
 def _refresh_model_status() -> None:
+    import urllib.error  # noqa: PLC0415
+
     client = select_chat_client()
     try:
-        client.complete("Reply with OK.", [{"role": "user", "content": "OK?"}], max_tokens=5)
-        value = "ok"
+        client.ping()
+        value = f"ok ({client.name})"
+    except urllib.error.HTTPError as exc:
+        # 401/403: the key; 404: the model name. No response body, so nothing secret.
+        value = f"{client.name} answered HTTP {exc.code} (answers fall back to extracts)"
+    except LookupError:
+        value = f"{client.name} key works but the model name is not available (answers fall back to extracts)"
     except Exception:  # noqa: BLE001
         value = "unreachable (answers fall back to extracts)"
     _model_status_cache.update(at=time.time(), value=value, refreshing=False)

@@ -18,6 +18,7 @@ from collections.abc import Iterator
 from typing import Protocol
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODELS_URL = "https://api.groq.com/openai/v1/models"
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:{method}"
 # Finish reasons that mean the text was cut off rather than completed.
 _GEMINI_CUT_OFF = frozenset({"SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "OTHER"})
@@ -75,6 +76,20 @@ class GroqChatClient:
             method="POST",
         )
 
+    def ping(self) -> None:
+        """Check the key works and the model exists, without generating anything.
+
+        (A tiny completion is not a fair test: reasoning models spend a small
+        token budget thinking and return nothing.)
+        """
+        req = urllib.request.Request(GROQ_MODELS_URL, method="GET", headers={
+            "Authorization": f"Bearer {self._api_key}", "User-Agent": "omero-api/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        ids = {m.get("id") for m in data.get("data", []) if isinstance(m, dict)}
+        if self._model not in ids:
+            raise LookupError(f"Groq has no model named {self._model!r}.")
+
     def complete(self, system: str, messages: list[dict[str, str]], *, max_tokens: int = 1024) -> str:
         req = self._request(system, messages, max_tokens, stream=False)
         with urllib.request.urlopen(req, timeout=self._timeout) as resp:
@@ -122,6 +137,15 @@ class GeminiChatClient:
             headers={"Content-Type": "application/json", "x-goog-api-key": self._api_key},
             method="POST",
         )
+
+    def ping(self) -> None:
+        """Check the key works and the model exists, without generating anything."""
+        req = urllib.request.Request(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}",
+            method="GET", headers={"x-goog-api-key": self._api_key},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.read()
 
     @staticmethod
     def _text(event: dict) -> str:

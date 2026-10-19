@@ -265,6 +265,13 @@ def _build_runtime() -> None:
     """Construct the data-plane components, mirroring the stdlib server so both
     share identical behaviour. Postgres path when DATABASE_URL is set, else the
     in-memory demo path."""
+    if os.environ.get("DATABASE_URL"):
+        # Fail with a plain message, not a missing-column error deep in startup.
+        from omni_modal.db.pool import get_connection_pool  # noqa: PLC0415
+        from omni_modal.db.schema_check import assert_schema_current  # noqa: PLC0415
+
+        with get_connection_pool().connection() as conn:
+            assert_schema_current(conn)
     selection = select_embedding_provider()
     provider = selection.provider
     # Local Whisper when installed, else Groq's hosted Whisper (the deployment

@@ -33,6 +33,7 @@ from omni_modal.observability import observability
 from omni_modal.orchestration import InternalResearchAdkWorkflow, Phase1Orchestrator
 from omni_modal.orchestration.adk_workflow import AgentWorkflowResult
 from omni_modal.orchestration.a2a import external_client_from_environment
+from omni_modal.research.external import select_web_search
 from omni_modal.qa import (
     PgVectorChunkRetriever,
     QueryRequest,
@@ -50,7 +51,7 @@ from omni_modal.qa.in_memory_store import (
 )
 from omni_modal.saas import get_saas_service
 from omni_modal.saas.adapters.storage import content_disposition, safe_download_name
-from omni_modal.saas.plans import PLANS, PlanLimitExceeded
+from omni_modal.saas.plans import FEATURE_EXTERNAL_DELEGATION, PLANS, PlanLimitExceeded, get_plan
 from omni_modal.security.accounts import AccountError, get_account_service
 from omni_modal.security.auth import AuthError, JwtClaims, _make_jwt, jwt_secret_from_env, verify_jwt
 from omni_modal.security.mfa import MfaAlreadyEnrolled, MfaLocked
@@ -160,6 +161,10 @@ class ProjectItemUpdate(BaseModel):
     body: str | None = Field(None, max_length=50_000)
 
 
+class ResearchSettingsRequest(BaseModel):
+    external_research_enabled: bool
+
+
 class SessionProjectRequest(BaseModel):
     project_id: str | None = Field(None, max_length=64)
 
@@ -239,6 +244,7 @@ class _State:
     audit_sink: Any = None
     rate_limiter: Any = None
     heavy_rate_limiter: Any = None
+    web_search: Any = None
     query_cache: Any = None
     sessions: Any = None
     mfa: Any = None
@@ -317,8 +323,10 @@ def _build_runtime() -> None:
     state.retriever = retriever
     if isinstance(retriever, InMemoryChunkRetriever):
         retriever.is_searchable = _document_searchable
+    state.web_search = select_web_search()
     state.workflow = InternalResearchAdkWorkflow(
-        retriever, external_client_from_environment(), select_answer_synthesizer()
+        retriever, external_client_from_environment(), select_answer_synthesizer(),
+        web_search=state.web_search,
     )
     chat_client = select_chat_client()
     state.research_sessions = select_research_session_service()
@@ -784,6 +792,7 @@ def create_app() -> FastAPI:
         req = QueryRequest(
             tenant_id=claims.tenant_id, user_id=claims.user_id, question=body.question,
             top_k=body.top_k, min_similarity=body.min_similarity,
+            external_permit=_web_permit(claims),
         )
         try:
             result = state.workflow.answer(req)
@@ -876,6 +885,7 @@ def create_app() -> FastAPI:
                     tenant_id=claims.tenant_id, user_id=claims.user_id, question=body.question,
                     top_k=body.top_k, min_similarity=body.min_similarity,
                     history=tuple(history), search_query=search_query, document_ids=scope,
+                    external_permit=_web_permit(claims),
                 )
                 result = None
                 try:
@@ -942,6 +952,39 @@ def create_app() -> FastAPI:
         except SessionNotFound as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found.") from exc
         return {"deleted": True}
+
+    # ── Web research setting ─────────────────────────────────────────────
+    def _web_permit(claims: JwtClaims):
+        """Asked by the workflow only when the documents cannot answer a question."""
+        def permit() -> str | None:
+            limiter = state.heavy_rate_limiter
+            return state.saas.external_research_permit(
+                tenant_id=claims.tenant_id, user_id=claims.user_id,
+                throttle=(lambda: limiter.check_delegation(claims.tenant_id)) if limiter is not None else None,
+            )
+        return permit
+
+    def _research_settings(tenant_id: str, user_id: str) -> dict:
+        org = state.saas.ensure_org(tenant_id, owner_user_id=user_id)
+        plan = get_plan(org.plan_id)
+        return {
+            "external_research_enabled": org.external_research_enabled,
+            "provider_configured": state.web_search is not None,
+            "plan_includes": plan.has_feature(FEATURE_EXTERNAL_DELEGATION),
+            "monthly_limit": plan.limit_for("external_research"),
+            "used_this_month": state.saas.usage.get(tenant_id, "external_research"),
+        }
+
+    @app.get("/workspace/research-settings", tags=["workspace"])
+    def get_research_settings(claims: JwtClaims = Depends(current_claims)) -> dict:
+        return _research_settings(claims.tenant_id, claims.user_id)
+
+    @app.put("/workspace/research-settings", tags=["workspace"])
+    def put_research_settings(body: ResearchSettingsRequest,
+                              claims: JwtClaims = Depends(require_roles("/workspace/settings"))) -> dict:
+        state.saas.set_external_research(tenant_id=claims.tenant_id, user_id=claims.user_id,
+                                         enabled=body.external_research_enabled)
+        return _research_settings(claims.tenant_id, claims.user_id)
 
     # ── Site-wide assistant (read-only) ──────────────────────────────────
     @app.post("/assistant/stream", tags=["assistant"], dependencies=[Depends(heavy_request)])
@@ -1513,6 +1556,13 @@ def create_app() -> FastAPI:
         return {
             "documents": {**by_status, "archived": archived_count, "total": sum(by_status.values())},
             "projects": len(projects),
+            # First-run checklist: has each step of the main journey happened yet?
+            "progress": {
+                "uploaded": sum(counts.values()) + archived_count > 0,
+                "asked": bool(sessions),
+                "project": bool(names),
+                "report": bool(state.projects.my_reports(tenant, claims.user_id)),
+            },
             "recent_documents": [d.to_dict() for d in recent],
             "recent_sessions": [s.to_dict() for s in sessions],
             "recent_activity": [

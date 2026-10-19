@@ -126,6 +126,17 @@ class ProjectsApiTests(unittest.TestCase):
         self.assertEqual(report.json()["project_id"], pid)
         self.assertIn("## 1. What was headcount?", report.json()["markdown"])
 
+    def test_dashboard_progress_follows_the_journey(self) -> None:
+        auth = self._user("proj-progress@example.com")
+        progress = lambda: self.client.get("/dashboard", headers=auth).json()["progress"]  # noqa: E731
+        self.assertEqual(progress(), {"uploaded": False, "asked": False, "project": False, "report": False})
+        self._upload(auth, "The renewal is due in March.", "renewal.pdf")
+        self.client.post("/query/stream", headers=auth, json={"question": "When is the renewal due?"})
+        pid = self._project(auth)
+        self.assertEqual(progress(), {"uploaded": True, "asked": True, "project": True, "report": False})
+        self.client.post(f"/projects/{pid}/reports", headers=auth)
+        self.assertTrue(progress()["report"])
+
     def test_auditor_reads_but_cannot_change(self) -> None:
         reg = self.client.post("/auth/register", json={"email": "proj-audit@example.com",
                                                        "password": "password123"}).json()

@@ -14,6 +14,7 @@ NodeName = Literal[
     "delegate_external_research",
     "merge_external_evidence",
     "synthesize_answer",
+    "web_research",
     "controlled_fallback",
 ]
 
@@ -34,6 +35,8 @@ class AgentGraphState:
     external_delegation_attempted: bool = False
     response: QueryResponse | None = None
     error_message: str | None = None
+    # Why a web search did not run or found nothing, shown to the user.
+    web_note: str | None = None
     trace: list[GraphNodeTrace] = field(default_factory=list)
 
     def add_trace(

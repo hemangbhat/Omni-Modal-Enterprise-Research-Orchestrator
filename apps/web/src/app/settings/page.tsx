@@ -5,10 +5,11 @@ import { useEffect, useState } from "react";
 import { MaterialIcon } from "@/components/material-icon";
 import { MfaSettings } from "@/components/mfa-settings";
 import { TopBar } from "@/components/top-bar";
+import { WebResearchSettings } from "@/components/web-research-settings";
 import { apiRequest } from "@/lib/api-client";
 import { getClientApiConfig } from "@/lib/env";
 
-const TABS = ["Security", "Infrastructure"] as const;
+const TABS = ["Security", "Research", "Infrastructure"] as const;
 type Tab = (typeof TABS)[number];
 
 type ComponentEntry = { name: string; state: string; detail: string };
@@ -96,6 +97,8 @@ export default function SettingsPage() {
               .
             </p>
           </div>
+        ) : tab === "Research" ? (
+          <WebResearchSettings />
         ) : (
           <section>
             {/* System health — from the live /health endpoint */}

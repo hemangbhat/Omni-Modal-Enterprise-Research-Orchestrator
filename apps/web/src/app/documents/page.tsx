@@ -257,8 +257,8 @@ function DocumentsView() {
                 : `${total} document${total !== 1 ? "s" : ""} in your library. Archived documents are on the Archives page.`}
           </p>
         </div>
-        <div className="flex items-center gap-md">
-          <div className="relative">
+        <div className="flex w-full flex-wrap items-center gap-sm sm:w-auto sm:gap-md">
+          <div className="relative min-w-0 flex-1 sm:flex-none">
             <MaterialIcon name="search" size={18} className="absolute left-sm top-1/2 -translate-y-1/2 text-on-surface-variant" />
             <input
               type="text"
@@ -266,7 +266,7 @@ function DocumentsView() {
               placeholder="Search titles and file names…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="w-64 rounded-lg border border-outline-variant/30 bg-surface-container-lowest py-sm pl-xl pr-md font-body-md text-body-md text-on-surface shadow-[inset_0_2px_4px_rgba(0,0,0,0.2)] transition-all placeholder:text-on-surface-variant/50 focus:border-primary-fixed-dim focus:outline-none focus:ring-1 focus:ring-primary-fixed-dim"
+              className="w-full rounded-lg border border-outline-variant/30 bg-surface-container-lowest py-sm pl-xl sm:w-64 pr-md font-body-md text-body-md text-on-surface shadow-[inset_0_2px_4px_rgba(0,0,0,0.2)] transition-all placeholder:text-on-surface-variant/50 focus:border-primary-fixed-dim focus:outline-none focus:ring-1 focus:ring-primary-fixed-dim"
             />
           </div>
           <Link

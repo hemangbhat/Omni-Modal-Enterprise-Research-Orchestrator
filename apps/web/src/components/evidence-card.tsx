@@ -18,6 +18,8 @@ export function EvidenceCard({
 }) {
   const location = citationLocation(citation);
   const audio = citation.source_type === "audio";
+  const web = citation.scope === "external";
+  const link = web && citation.url && /^https?:\/\//.test(citation.url) ? citation.url : null;
   return (
     <figure
       id={anchor ? `evidence-${index}` : undefined}
@@ -38,15 +40,29 @@ export function EvidenceCard({
           {index}
         </span>
         <span className="flex min-w-0 flex-col gap-[2px]">
-          <span className="truncate text-[14px] font-medium text-on-surface" title={citation.title}>
-            {citation.title}
-          </span>
+          {link ? (
+            <a
+              href={link}
+              target="_blank"
+              rel="noopener noreferrer nofollow"
+              className="truncate text-[14px] font-medium text-primary-fixed-dim underline-offset-2 hover:underline"
+              title={link}
+            >
+              {citation.title}
+            </a>
+          ) : (
+            <span className="truncate text-[14px] font-medium text-on-surface" title={citation.title}>
+              {citation.title}
+            </span>
+          )}
           <span className="flex flex-wrap items-center gap-x-sm text-[12px] text-on-surface-variant/80">
             <span className="inline-flex items-center gap-[3px]">
-              <MaterialIcon name={audio ? "graphic_eq" : "description"} size={13} />
-              {location ?? (audio ? "Audio" : "Document")}
+              <MaterialIcon name={web ? "public" : audio ? "graphic_eq" : "description"} size={13} />
+              {web ? (link ? new URL(link).hostname : "Web") : location ?? (audio ? "Audio" : "Document")}
             </span>
-            <span>{citation.scope === "external" ? "External source" : "Your workspace"}</span>
+            <span className={web ? "rounded bg-tertiary-container/30 px-1 text-on-surface" : undefined}>
+              {web ? "From the web" : "Your workspace"}
+            </span>
             {!citation.cited ? <span>Retrieved, not cited</span> : null}
           </span>
         </span>

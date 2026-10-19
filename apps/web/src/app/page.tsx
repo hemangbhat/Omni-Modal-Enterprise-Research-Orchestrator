@@ -3,7 +3,9 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { MaterialIcon } from "@/components/material-icon";
+import { FirstRunChecklist } from "@/components/first-run-checklist";
 import { TopBar } from "@/components/top-bar";
+import { useClaims } from "@/lib/use-claims";
 import { describeActivity } from "@/lib/projects-api";
 import { getDashboard, type Dashboard } from "@/lib/workspace-api";
 
@@ -24,6 +26,7 @@ function ago(epochSeconds: number): string {
 export default function HomePage() {
   const [data, setData] = useState<Dashboard | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const claims = useClaims();
 
   useEffect(() => {
     getDashboard()
@@ -31,7 +34,6 @@ export default function HomePage() {
       .catch((err: Error) => setError(err.message));
   }, []);
 
-  const empty = data !== null && data.documents.total === 0 && data.documents.archived === 0;
   const usage = data?.usage;
 
   return (
@@ -60,26 +62,7 @@ export default function HomePage() {
 
           {error ? <p role="alert" className="text-error">{error}</p> : null}
 
-          {empty ? (
-            <section className="rounded-2xl border border-outline-variant/30 bg-surface-container-low p-lg" aria-labelledby="start-heading">
-              <h3 id="start-heading" className="mb-md text-[19px] font-semibold text-on-surface">Getting started</h3>
-              <ol className="grid grid-cols-1 gap-md md:grid-cols-3">
-                {[
-                  ["Upload a document", "PDFs and recordings are read, split into passages and indexed.", "/upload"],
-                  ["Ask a question", "Answers cite the page or the moment in the recording they come from.", "/research"],
-                  ["Keep what matters", "Save answers to a project and generate a report from them.", "/projects"]
-                ].map(([title, text, href], i) => (
-                  <li key={title}>
-                    <Link href={href} className="flex h-full flex-col gap-xs rounded-xl border border-outline-variant/30 p-md hover:border-primary-fixed-dim/50">
-                      <span className="text-[13px] font-medium text-primary-fixed-dim">Step {i + 1}</span>
-                      <span className="text-[16px] font-semibold text-on-surface">{title}</span>
-                      <span className="text-[14px] leading-relaxed text-on-surface-variant">{text}</span>
-                    </Link>
-                  </li>
-                ))}
-              </ol>
-            </section>
-          ) : null}
+          {data?.progress && claims ? <FirstRunChecklist progress={data.progress} userId={claims.user_id} /> : null}
 
           {data ? (
             <div className="grid grid-cols-1 gap-md sm:grid-cols-2 lg:grid-cols-4">

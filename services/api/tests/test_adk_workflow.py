@@ -71,6 +71,7 @@ class AdkWorkflowTest(unittest.TestCase):
                 "delegate_external_research",
                 "merge_external_evidence",
                 "synthesize_answer",
+                "web_research",
                 "controlled_fallback",
             ],
         )

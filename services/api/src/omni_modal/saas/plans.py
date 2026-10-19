@@ -37,6 +37,8 @@ class Plan:
     monthly_upload_limit: int
     storage_mb: int
     features: frozenset[str]
+    # Web searches for questions the documents cannot answer, per month.
+    monthly_external_research_limit: int = 0
 
     def has_feature(self, feature: str) -> bool:
         return feature in self.features
@@ -48,6 +50,7 @@ class Plan:
             "queries": self.monthly_query_limit,
             "uploads": self.monthly_upload_limit,
             "storage_mb": self.storage_mb,
+            "external_research": self.monthly_external_research_limit,
         }.get(metric, -1)
 
     def to_dict(self) -> dict[str, object]:
@@ -60,6 +63,7 @@ class Plan:
             "monthly_query_limit": self.monthly_query_limit,
             "monthly_upload_limit": self.monthly_upload_limit,
             "storage_mb": self.storage_mb,
+            "monthly_external_research_limit": self.monthly_external_research_limit,
             "features": sorted(self.features),
         }
 
@@ -93,6 +97,7 @@ PLANS: dict[str, Plan] = {
         monthly_query_limit=5_000,
         monthly_upload_limit=1_000,
         storage_mb=10_240,
+        monthly_external_research_limit=300,
         features=frozenset(
             {
                 FEATURE_API_ACCESS,
@@ -111,6 +116,7 @@ PLANS: dict[str, Plan] = {
         monthly_query_limit=-1,
         monthly_upload_limit=-1,
         storage_mb=-1,
+        monthly_external_research_limit=-1,
         features=frozenset(
             {
                 FEATURE_API_ACCESS,

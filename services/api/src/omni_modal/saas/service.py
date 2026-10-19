@@ -23,6 +23,7 @@ from omni_modal.saas.notifications import (
     NotificationStore,
 )
 from omni_modal.saas.plans import (
+    FEATURE_EXTERNAL_DELEGATION,
     PLANS,
     Plan,
     PlanLimitExceeded,
@@ -285,6 +286,33 @@ class SaasService:
             body=f"Your plan is now {PLANS[plan_id].name}.", kind=KIND_SUCCESS,
         )
         return updated
+
+    def set_external_research(self, *, tenant_id: str, user_id: str, enabled: bool) -> Organization | None:
+        org = self.ensure_org(tenant_id, owner_user_id=user_id)
+        return self.workspaces.set_external_research(org.id, enabled)
+
+    def external_research_permit(self, *, tenant_id: str, user_id: str, throttle=None) -> str | None:
+        """None when this question may be searched on the web (and counts it), else why not.
+
+        ``throttle`` (optional) raises ``RateLimitExceeded`` past the hourly limit.
+        """
+        org = self.workspaces.get_org_by_tenant(tenant_id)
+        if org is None or not org.external_research_enabled:
+            return "it is turned off for this workspace. An admin can turn it on in Settings."
+        if not get_plan(org.plan_id).has_feature(FEATURE_EXTERNAL_DELEGATION):
+            return "the workspace's plan does not include web research."
+        if throttle is not None:
+            from omni_modal.security.rate_limiting import RateLimitExceeded  # noqa: PLC0415
+
+            try:
+                throttle()
+            except RateLimitExceeded:
+                return "too many web searches in the last hour. Try again later."
+        try:
+            self.record_usage(tenant_id=tenant_id, user_id=user_id, metric="external_research")
+        except PlanLimitExceeded:
+            return "this month's web search allowance is used up."
+        return None
 
     def billing_mode(self) -> str:
         """Honest billing status: 'stripe' only when the Stripe adapter is live."""

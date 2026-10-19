@@ -10,8 +10,8 @@ import "./globals.css";
 initSentry();
 
 export const metadata: Metadata = {
-  title: "Omni-Modal Research Orchestrator",
-  description: "Enterprise research orchestration workspace",
+  title: "OMERO: research from your own documents",
+  description: "Ask questions of your documents and recordings, and get answers that cite the page they came from.",
 };
 
 export default function RootLayout({
@@ -28,7 +28,7 @@ export default function RootLayout({
         />
         <link
           rel="stylesheet"
-          href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;900&family=JetBrains+Mono:wght@400;500&display=swap"
+          href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&display=swap"
         />
         <link
           rel="stylesheet"

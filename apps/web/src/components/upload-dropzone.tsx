@@ -225,7 +225,7 @@ function UploadRow({ item }: { item: UploadItem }) {
   const finished = item.phase === "done" || item.phase === "duplicate";
   const current = stepIndex(item.phase);
   return (
-    <li className="rounded-2xl border border-outline-variant/30 bg-surface-container-low p-md" aria-live="polite">
+    <li className="rounded-2xl border border-outline-variant/30 bg-surface-container-low p-md" aria-live="polite" data-phase={item.phase}>
       <div className="mb-sm flex items-start justify-between gap-md">
         <div className="min-w-0">
           <p className="truncate text-[15px] font-medium text-on-surface" title={item.name}>

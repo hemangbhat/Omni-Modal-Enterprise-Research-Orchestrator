@@ -15,7 +15,7 @@ const ROLES = ["researcher", "admin", "auditor"];
 
 function roleBadge(role: string) {
   return (
-    <span className="rounded border border-outline-variant/20 bg-surface-container px-sm py-0.5 font-mono-sm text-[10px] uppercase tracking-wider text-primary-fixed-dim">
+    <span className="rounded border border-outline-variant/20 bg-surface-container px-sm py-0.5 font-mono-sm text-[10px] text-primary-fixed-dim">
       {role}
     </span>
   );
@@ -101,7 +101,7 @@ export default function TeamPage() {
               onSubmit={handleInvite}
               className="mb-lg rounded-xl border border-outline-variant/30 bg-surface-container-low p-lg"
             >
-              <h3 className="mb-md font-label-md text-label-md uppercase tracking-wider text-on-surface-variant">
+              <h3 className="mb-md font-label-md text-label-md text-on-surface-variant">
                 Invite a member
               </h3>
               <div className="flex flex-col gap-sm sm:flex-row">
@@ -156,7 +156,7 @@ export default function TeamPage() {
 
               {lastLink ? (
                 <div className="mt-md rounded-lg border border-primary-fixed-dim/30 bg-primary-fixed/5 p-sm">
-                  <div className="mb-xs flex items-center gap-xs font-mono-sm text-[11px] uppercase tracking-wider text-primary-fixed-dim">
+                  <div className="mb-xs flex items-center gap-xs font-mono-sm text-[11px] text-primary-fixed-dim">
                     <MaterialIcon name="link" size={14} />
                     Shareable invite link
                   </div>
@@ -244,7 +244,7 @@ export default function TeamPage() {
                 {/* Pending invites */}
                 {invites.length > 0 ? (
                   <div>
-                    <h3 className="mb-md font-label-md text-label-md uppercase tracking-wider text-on-surface-variant">
+                    <h3 className="mb-md font-label-md text-label-md text-on-surface-variant">
                       Pending invites ({invites.length})
                     </h3>
                     <div className="flex flex-col gap-sm">

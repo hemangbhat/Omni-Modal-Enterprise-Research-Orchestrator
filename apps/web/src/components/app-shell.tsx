@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { AssistantPanel } from "@/components/assistant-panel";
 import { MaterialIcon } from "@/components/material-icon";
+import { Wordmark } from "@/components/wordmark";
 import { useAuth } from "@/components/auth-context";
 
 type NavItem = { href: string; label: string; icon: string };
@@ -99,26 +100,18 @@ export function AppShell({ children }: { children: ReactNode }) {
   return (
     <div className="flex min-h-screen bg-surface text-on-surface">
       {/* SideNavBar — desktop */}
-      <nav className="fixed left-0 top-0 z-40 hidden h-screen w-sidebar_width flex-col border-r border-outline-variant/20 bg-surface-container-low py-xl shadow-xl md:flex">
-        <div className="mb-xl flex items-center gap-md px-lg">
-          <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary-fixed-dim text-on-primary-fixed shadow-[0_0_15px_rgba(0,218,243,0.3)]">
-            <MaterialIcon name="science" size={18} fill />
-          </span>
-          <div>
-            <h1 className="font-headline-md text-headline-md font-black tracking-tight text-on-surface">
-              OMERO
-            </h1>
-            <p className="font-mono-sm text-mono-sm text-primary-fixed-dim/80">AI Research</p>
-          </div>
-        </div>
+      <nav className="fixed left-0 top-0 z-40 hidden h-screen w-sidebar_width flex-col border-r border-outline-variant/40 bg-surface-container-lowest py-xl md:flex">
+        <Link href="/" aria-label="OMERO home" className="mb-xl block rounded-md px-lg">
+          <Wordmark />
+        </Link>
 
         <div className="mb-lg px-lg">
           <Link
             href="/research"
-            className="flex w-full items-center justify-center gap-sm rounded-lg border border-outline-variant/30 bg-surface-container-high px-md py-md font-label-md text-label-md text-primary transition-all duration-200 hover:border-primary-fixed-dim/50"
+            className="flex w-full items-center justify-center gap-sm rounded-lg bg-primary-fixed-dim px-md py-[10px] font-label-md text-label-md font-semibold text-on-primary-fixed transition-colors duration-150 hover:bg-primary"
           >
             <MaterialIcon name="add" size={18} />
-            New Analysis
+            New question
           </Link>
           <button
             type="button"
@@ -145,7 +138,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                   href={item.href}
                   className={
                     active
-                      ? "flex items-center gap-md rounded-r-md border-l-2 border-primary-fixed-dim bg-surface-container-high/50 px-md py-sm font-label-md text-label-md text-primary-fixed-dim transition-all duration-200"
+                      ? "flex items-center gap-md rounded-r-md border-l-2 border-primary-fixed-dim bg-surface-container-high px-md py-sm font-label-md text-label-md font-semibold text-on-surface transition-colors duration-150"
                       : "flex items-center gap-md rounded-md px-md py-sm font-label-md text-label-md text-on-surface-variant transition-all duration-200 hover:bg-surface-container-high hover:text-on-surface"
                   }
                 >
@@ -157,7 +150,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           })}
 
           <li className="my-sm px-md">
-            <span className="font-mono-sm text-[11px] uppercase tracking-wider text-on-surface-variant">
+            <span className="font-mono-sm text-[11px] text-on-surface-variant">
               Manage
             </span>
           </li>
@@ -170,7 +163,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                   href={item.href}
                   className={
                     active
-                      ? "flex items-center gap-md rounded-r-md border-l-2 border-primary-fixed-dim bg-surface-container-high/50 px-md py-sm font-label-md text-label-md text-primary-fixed-dim transition-all duration-200"
+                      ? "flex items-center gap-md rounded-r-md border-l-2 border-primary-fixed-dim bg-surface-container-high px-md py-sm font-label-md text-label-md font-semibold text-on-surface transition-colors duration-150"
                       : "flex items-center gap-md rounded-md px-md py-sm font-label-md text-label-md text-on-surface-variant transition-all duration-200 hover:bg-surface-container-high hover:text-on-surface"
                   }
                 >
@@ -211,9 +204,9 @@ export function AppShell({ children }: { children: ReactNode }) {
       <div className="flex min-h-screen min-w-0 flex-1 flex-col overflow-x-clip md:ml-[240px]">
         {/* Mobile top bar */}
         <header className="sticky top-0 z-50 flex h-16 w-full items-center justify-between border-b border-outline-variant/30 bg-surface/80 px-lg shadow-sm backdrop-blur-xl md:hidden">
-          <h1 className="font-headline-md text-headline-md font-bold tracking-tight text-on-surface">
-            OMERO
-          </h1>
+          <Link href="/" aria-label="OMERO home" className="rounded-md">
+            <Wordmark tagline={false} />
+          </Link>
           <div className="flex items-center gap-xs">
             <button
               type="button"

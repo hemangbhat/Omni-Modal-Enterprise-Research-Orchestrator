@@ -59,27 +59,27 @@ function StatusPill({ status }: { status: DocStatus }) {
   const display = statusToDisplay(status);
   if (display === "Indexed") {
     return (
-      <span className="inline-flex items-center gap-xs rounded-full border border-primary-container/20 bg-primary-container/10 px-sm py-0.5 font-mono-sm text-[10px] uppercase tracking-wider text-primary-fixed-dim">
+      <span className="inline-flex items-center gap-xs rounded-full border border-primary-container/20 bg-primary-container/10 px-sm py-0.5 font-mono-sm text-[10px] text-primary-fixed-dim">
         <span className="h-1.5 w-1.5 rounded-full bg-primary-fixed-dim" /> Indexed
       </span>
     );
   }
   if (display === "Processing") {
     return (
-      <span className="inline-flex items-center gap-xs rounded-full border border-amber-500/30 bg-amber-500/10 px-sm py-0.5 font-mono-sm text-[10px] uppercase tracking-wider text-amber-400">
+      <span className="inline-flex items-center gap-xs rounded-full border border-amber-500/30 bg-amber-500/10 px-sm py-0.5 font-mono-sm text-[10px] text-amber-400">
         <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" /> Processing
       </span>
     );
   }
   if (display === "Uploading") {
     return (
-      <span className="inline-flex items-center gap-xs rounded-full border border-outline-variant/30 bg-surface-variant px-sm py-0.5 font-mono-sm text-[10px] uppercase tracking-wider text-on-surface-variant">
+      <span className="inline-flex items-center gap-xs rounded-full border border-outline-variant/30 bg-surface-variant px-sm py-0.5 font-mono-sm text-[10px] text-on-surface-variant">
         <span className="h-1.5 w-1.5 rounded-full bg-outline" /> Uploaded
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-xs rounded-full border border-error/30 bg-error-container/20 px-sm py-0.5 font-mono-sm text-[10px] uppercase tracking-wider text-error">
+    <span className="inline-flex items-center gap-xs rounded-full border border-error/30 bg-error-container/20 px-sm py-0.5 font-mono-sm text-[10px] text-error">
       <MaterialIcon name="error" size={10} /> Failed
     </span>
   );
@@ -238,17 +238,11 @@ function DocumentsView() {
 
   return (
     <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-surface">
-      <div className="pointer-events-none absolute right-0 top-0 h-[600px] w-[600px] -translate-y-1/4 rounded-full bg-primary-container/5 blur-[120px]" />
 
       {/* Page header */}
       <div className="relative z-10 flex flex-col justify-between gap-md border-b border-outline-variant/10 bg-surface/40 px-xl pb-lg pt-xl backdrop-blur-sm sm:flex-row sm:items-end">
         <div>
-          <div className="mb-xs flex items-center gap-sm text-on-surface-variant">
-            <span className="font-mono-sm text-mono-sm">Workspace</span>
-            <MaterialIcon name="chevron_right" size={14} />
-            <span className="font-mono-sm text-mono-sm text-primary-fixed-dim">Document Library</span>
-          </div>
-          <h2 className="font-headline-lg text-headline-lg text-on-surface">Knowledge Base</h2>
+          <h2 className="font-headline-lg text-headline-lg text-on-surface">Documents</h2>
           <p className="mt-sm max-w-2xl font-body-md text-body-md text-on-surface-variant">
             {loading
               ? "Loading documents…"
@@ -271,7 +265,7 @@ function DocumentsView() {
           </div>
           <Link
             href="/upload"
-            className="flex items-center gap-sm rounded-lg bg-primary-container px-md py-sm font-label-md text-label-md text-on-primary-container shadow-[0_0_10px_rgba(0,218,243,0.15)] transition-colors hover:bg-primary-fixed-dim"
+            className="flex items-center gap-sm rounded-lg bg-primary-container px-md py-sm font-label-md text-label-md text-on-primary-container transition-colors hover:bg-primary-fixed-dim"
           >
             <MaterialIcon name="upload_file" size={16} />
             Upload
@@ -598,7 +592,7 @@ function DocumentsView() {
               </div>
 
               <div>
-                <h4 className="mb-md border-b border-outline-variant/10 pb-sm font-mono-sm text-mono-sm uppercase tracking-widest text-on-surface-variant">
+                <h4 className="mb-md border-b border-outline-variant/10 pb-sm font-mono-sm text-mono-sm text-on-surface-variant">
                   Document Info
                 </h4>
                 <div className="flex flex-col gap-md">
@@ -623,7 +617,7 @@ function DocumentsView() {
               </div>
 
               <div>
-                <h4 className="mb-md flex items-center gap-xs border-b border-outline-variant/10 pb-sm font-mono-sm text-mono-sm uppercase tracking-widest text-on-surface-variant">
+                <h4 className="mb-md flex items-center gap-xs border-b border-outline-variant/10 pb-sm font-mono-sm text-mono-sm text-on-surface-variant">
                   <MaterialIcon name="auto_awesome" size={14} className="text-primary-fixed-dim" />
                   Extracted Entities
                 </h4>

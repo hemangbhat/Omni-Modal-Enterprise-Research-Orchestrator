@@ -69,7 +69,7 @@ export function WebResearchSettings() {
               checked={settings.external_research_enabled}
               disabled={!isAdmin || saving}
               onChange={(e) => void toggle(e.target.checked)}
-              className="h-5 w-5 accent-[var(--color-primary-fixed-dim,#00daf3)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-fixed-dim"
+              className="h-5 w-5 accent-[#E3B341] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-fixed-dim"
             />
             <span className="text-[15px] text-on-surface">
               {settings.external_research_enabled ? "On for this workspace" : "Off for this workspace"}
@@ -108,7 +108,7 @@ export function WebResearchSettings() {
 function Fact({ label, value, ok }: { label: string; value: string; ok: boolean }) {
   return (
     <div className="rounded-xl border border-outline-variant/20 p-sm">
-      <dt className="text-[12px] uppercase tracking-wide text-on-surface-variant/80">{label}</dt>
+      <dt className="text-[12px] tracking-wide text-on-surface-variant/80">{label}</dt>
       <dd className="mt-[2px] flex items-center gap-xs text-on-surface">
         <MaterialIcon name={ok ? "check_circle" : "info"} size={16} className={ok ? "text-primary-fixed-dim" : "text-on-surface-variant"} />
         {value}

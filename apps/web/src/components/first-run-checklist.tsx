@@ -96,7 +96,7 @@ export function FirstRunChecklist({ progress, userId }: { progress: Progress; us
                   {step.title}
                 </span>
                 <span className="text-[14px] leading-relaxed text-on-surface-variant">{step.text}</span>
-                {!complete ? <span className="mt-auto pt-xs text-[13px] font-medium text-primary-fixed-dim">{step.action} →</span> : null}
+                {!complete ? <span className="mt-auto pt-xs text-[13px] font-medium text-primary-fixed-dim">{step.action}</span> : null}
               </Link>
             </li>
           );

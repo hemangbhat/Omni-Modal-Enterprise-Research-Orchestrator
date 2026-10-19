@@ -23,7 +23,8 @@ test("sign up, upload, research, save to a project and report", async ({ page })
     .setInputFiles(path.join(__dirname, "fixtures", "vendor-contract.pdf"));
   const uploads = page.getByRole("region", { name: "Uploads" });
   await expect(uploads.getByText("vendor-contract.pdf")).toBeVisible();
-  await expect(uploads.getByText("Ready", { exact: true }).first()).toBeVisible({ timeout: 60_000 });
+  // Wait for processing to finish ("Ready" is also the name of the last step, so match the phase).
+  await expect(uploads.locator('li[data-phase="done"]')).toHaveCount(1, { timeout: 60_000 });
 
   // A project holding the document.
   await page.goto("/projects");

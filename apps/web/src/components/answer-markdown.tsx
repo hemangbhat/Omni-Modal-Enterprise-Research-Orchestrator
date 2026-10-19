@@ -74,10 +74,10 @@ function Inline({ text, citationCount, activeCitation, onCite }: Omit<Props, "ma
                     onCite?.(n);
                   }}
                   aria-label={`Show source ${n}`}
-                  className={`mx-[2px] inline-flex h-[1.35em] min-w-[1.35em] -translate-y-[1px] items-center justify-center rounded-md border px-1 align-middle font-mono-sm text-[11px] leading-none transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary-fixed-dim ${
+                  className={`mx-[1px] inline-flex h-[1.25em] min-w-[1.25em] -translate-y-[0.35em] items-center justify-center rounded-[3px] px-[3px] align-baseline font-sans text-[11px] font-semibold leading-none transition-colors ${
                     activeCitation === n
-                      ? "border-primary-fixed-dim bg-primary-fixed-dim text-on-primary-fixed"
-                      : "border-primary-fixed-dim/40 bg-primary-fixed-dim/10 text-primary-fixed-dim hover:bg-primary-fixed-dim/20"
+                      ? "bg-primary-fixed-dim text-on-primary-fixed"
+                      : "bg-primary-fixed-dim/20 text-primary hover:bg-primary-fixed-dim/35"
                   }`}
                 >
                   {n}
@@ -135,11 +135,11 @@ export function parseBlocks(markdown: string): Block[] {
 
 export function AnswerMarkdown({ markdown, ...inline }: Props) {
   return (
-    <div className="flex flex-col gap-md text-[16px] leading-[1.75] text-on-surface/90">
+    <div className="flex flex-col gap-md font-serif text-[17px] leading-[1.7] text-on-surface">
       {parseBlocks(markdown).map((block, i) => {
         if (block.kind === "heading") {
           return (
-            <h3 key={i} className="mt-sm font-headline-md text-[17px] font-semibold text-on-surface">
+            <h3 key={i} className="mt-sm font-sans text-[15px] font-semibold text-on-surface">
               <Inline text={block.text} {...inline} />
             </h3>
           );

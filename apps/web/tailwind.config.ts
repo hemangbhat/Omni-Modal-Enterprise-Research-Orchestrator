@@ -1,9 +1,10 @@
 import type { Config } from "tailwindcss";
 
 /**
- * OMERO design system — extracted verbatim from the Stitch reference screens
- * (dark navy enterprise theme). Legacy tokens (ink/muted/panel/line/accent)
- * are retained for backwards compatibility with any un-migrated components.
+ * OMERO design system: a reading room for evidence. Ink-blue paper, warm
+ * reading-white text, and one highlighter ochre reserved for evidence,
+ * citations, focus and the main action. Token names follow Material 3 so
+ * every component picks up the palette from here.
  */
 const config: Config = {
   darkMode: "class",
@@ -12,33 +13,33 @@ const config: Config = {
     extend: {
       colors: {
         // OMERO palette (source of truth: Stitch screens)
-        background: "#031427",
-        surface: "#031427",
-        "surface-dim": "#031427",
-        "surface-bright": "#2a3a4f",
-        "surface-container-lowest": "#000f21",
-        "surface-container-low": "#0b1c30",
-        "surface-container": "#102034",
-        "surface-container-high": "#1b2b3f",
-        "surface-container-highest": "#26364a",
-        "surface-variant": "#26364a",
-        "surface-tint": "#00daf3",
-        "on-surface": "#d3e4fe",
-        "on-surface-variant": "#bac9cc",
-        "on-background": "#d3e4fe",
-        outline: "#849396",
-        "outline-variant": "#3b494c",
-        primary: "#c3f5ff",
-        "primary-container": "#00e5ff",
-        "primary-fixed": "#9cf0ff",
-        "primary-fixed-dim": "#00daf3",
-        "on-primary": "#00363d",
-        "on-primary-container": "#00626e",
-        "on-primary-fixed": "#001f24",
-        "on-primary-fixed-variant": "#004f58",
-        "inverse-primary": "#006875",
-        "inverse-surface": "#d3e4fe",
-        "inverse-on-surface": "#213145",
+        background: "#0F141B",
+        surface: "#0F141B",
+        "surface-dim": "#0F141B",
+        "surface-bright": "#2C3642",
+        "surface-container-lowest": "#0B0F15",
+        "surface-container-low": "#141A23",
+        "surface-container": "#18202A",
+        "surface-container-high": "#1F2833",
+        "surface-container-highest": "#27313D",
+        "surface-variant": "#27313D",
+        "surface-tint": "#E3B341",
+        "on-surface": "#ECE7DC",
+        "on-surface-variant": "#B3B6BA",
+        "on-background": "#ECE7DC",
+        outline: "#858B92",
+        "outline-variant": "#36404B",
+        primary: "#F0CF7A",
+        "primary-container": "#E3B341",
+        "primary-fixed": "#F0CF7A",
+        "primary-fixed-dim": "#E3B341",
+        "on-primary": "#1A1406",
+        "on-primary-container": "#1A1406",
+        "on-primary-fixed": "#1A1406",
+        "on-primary-fixed-variant": "#3D2E07",
+        "inverse-primary": "#8A6A12",
+        "inverse-surface": "#ECE7DC",
+        "inverse-on-surface": "#1F2833",
         secondary: "#c6c6ca",
         "secondary-container": "#4a4b4f",
         "secondary-fixed": "#e2e2e6",
@@ -46,21 +47,21 @@ const config: Config = {
         "on-secondary": "#2f3034",
         "on-secondary-container": "#bbbbbf",
         tertiary: "#ebecf6",
-        "tertiary-container": "#ced0da",
+        "tertiary-container": "#5E6E84",
         "tertiary-fixed": "#e0e2ec",
         "tertiary-fixed-dim": "#c4c6d0",
         "on-tertiary": "#2d3038",
         "on-tertiary-container": "#565961",
-        error: "#ffb4ab",
-        "error-container": "#93000a",
-        "on-error": "#690005",
-        "on-error-container": "#ffdad6",
+        error: "#F2A39A",
+        "error-container": "#5C1A16",
+        "on-error": "#3A0C08",
+        "on-error-container": "#FFDAD5",
         // Legacy (kept so any leftover references still compile)
-        ink: "#d3e4fe",
-        muted: "#bac9cc",
-        panel: "#102034",
-        line: "#3b494c",
-        accent: "#00daf3"
+        ink: "#ECE7DC",
+        muted: "#B3B6BA",
+        panel: "#18202A",
+        line: "#36404B",
+        accent: "#E3B341"
       },
       borderRadius: {
         DEFAULT: "0.25rem",
@@ -83,13 +84,18 @@ const config: Config = {
         max_width: "1440px"
       },
       fontFamily: {
-        "display-lg": ["Inter", "sans-serif"],
-        "headline-lg": ["Inter", "sans-serif"],
-        "headline-md": ["Inter", "sans-serif"],
-        "body-lg": ["Inter", "sans-serif"],
-        "body-md": ["Inter", "sans-serif"],
-        "label-md": ["Inter", "sans-serif"],
-        "mono-sm": ["JetBrains Mono", "monospace"]
+        // Titles and quoted evidence read like the documents themselves.
+        serif: ['"Source Serif 4"', "Georgia", "serif"],
+        sans: ['"IBM Plex Sans"', "system-ui", "sans-serif"],
+        mono: ['"IBM Plex Mono"', "ui-monospace", "monospace"],
+        "display-lg": ['"Source Serif 4"', "Georgia", "serif"],
+        "headline-lg": ['"Source Serif 4"', "Georgia", "serif"],
+        "headline-md": ['"Source Serif 4"', "Georgia", "serif"],
+        "body-lg": ['"IBM Plex Sans"', "system-ui", "sans-serif"],
+        "body-md": ['"IBM Plex Sans"', "system-ui", "sans-serif"],
+        "label-md": ['"IBM Plex Sans"', "system-ui", "sans-serif"],
+        // Small labels use the interface sans; code and kbd stay monospace (globals.css).
+        "mono-sm": ['"IBM Plex Sans"', "system-ui", "sans-serif"]
       },
       fontSize: {
         "display-lg": [
@@ -111,7 +117,7 @@ const config: Config = {
         ],
         "label-md": [
           "13px",
-          { lineHeight: "1", letterSpacing: "0.03em", fontWeight: "500" }
+          { lineHeight: "1.2", letterSpacing: "0.005em", fontWeight: "500" }
         ],
         "mono-sm": ["12px", { lineHeight: "1.5", letterSpacing: "0", fontWeight: "400" }]
       }

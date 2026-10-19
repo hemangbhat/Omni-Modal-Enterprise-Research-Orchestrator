@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { AuthShell } from "@/components/auth-shell";
 import { MaterialIcon } from "@/components/material-icon";
 import { useAuth } from "@/components/auth-context";
 import { getDemoToken, isTokenExpired, setStoredEmail } from "@/lib/auth";
@@ -132,27 +133,7 @@ export default function SignInPage() {
   }
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center bg-surface px-lg">
-      <div className="w-full max-w-md">
-        {/* Logo */}
-        <div className="mb-xl flex items-center justify-center gap-md">
-          <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary-fixed-dim text-on-primary-fixed shadow-[0_0_20px_rgba(0,218,243,0.3)]">
-            <MaterialIcon name="science" size={22} fill />
-          </span>
-          <div>
-            <h1 className="font-headline-md text-headline-md font-black tracking-tight text-on-surface">
-              OMERO
-            </h1>
-            <p className="font-mono-sm text-mono-sm text-primary-fixed-dim/80">AI Research Platform</p>
-          </div>
-        </div>
-
-        {/* Card */}
-        <div className="premium-card rounded-2xl p-xl">
-          <h2 className="mb-sm font-headline-md text-headline-md text-on-surface">Sign in</h2>
-          <p className="mb-xl font-body-md text-body-md text-on-surface-variant">
-            {mfaToken ? "One more step to finish signing in." : "Sign in with your email and password."}
-          </p>
+    <AuthShell title="Sign in" intro={mfaToken ? "One more step to finish signing in." : "Sign in with your email and password."}>
 
           {error ? (
             <div role="alert" className="mb-lg rounded-xl border border-error/30 bg-error-container/20 px-lg py-md font-body-md text-[14px] text-error">
@@ -184,7 +165,7 @@ export default function SignInPage() {
               <button
                 type="submit"
                 disabled={submitting}
-                className="flex w-full items-center justify-center gap-sm rounded-xl bg-gradient-to-r from-primary-container to-primary px-lg py-md font-label-md text-label-md font-semibold text-on-primary-container shadow-[0_4px_14px_rgba(0,218,243,0.2)] transition-all hover:-translate-y-0.5 hover:shadow-[0_6px_20px_rgba(0,218,243,0.3)] disabled:opacity-60"
+                className="flex w-full items-center justify-center gap-sm rounded-xl bg-primary-fixed-dim hover:bg-primary px-lg py-md font-label-md text-label-md font-semibold text-on-primary-container transition-all disabled:opacity-60"
               >
                 {submitting ? (
                   <span className="h-4 w-4 animate-spin rounded-full border-2 border-on-primary-container/40 border-t-on-primary-container" />
@@ -226,7 +207,7 @@ export default function SignInPage() {
               <button
                 type="submit"
                 disabled={submitting}
-                className="flex w-full items-center justify-center gap-sm rounded-xl bg-gradient-to-r from-primary-container to-primary px-lg py-md font-label-md text-label-md font-semibold text-on-primary-container shadow-[0_4px_14px_rgba(0,218,243,0.2)] transition-all hover:-translate-y-0.5 hover:shadow-[0_6px_20px_rgba(0,218,243,0.3)] disabled:opacity-60"
+                className="flex w-full items-center justify-center gap-sm rounded-xl bg-primary-fixed-dim hover:bg-primary px-lg py-md font-label-md text-label-md font-semibold text-on-primary-container transition-all disabled:opacity-60"
               >
                 {submitting ? (
                   <span className="h-4 w-4 animate-spin rounded-full border-2 border-on-primary-container/40 border-t-on-primary-container" />
@@ -257,7 +238,7 @@ export default function SignInPage() {
             <>
             <div className="flex items-center gap-md">
               <span className="h-px flex-1 bg-outline-variant/20" />
-              <span className="font-mono-sm text-[11px] uppercase tracking-widest text-on-surface-variant/60">
+              <span className="font-mono-sm text-[11px] text-on-surface-variant/60">
                 or use a token
               </span>
               <span className="h-px flex-1 bg-outline-variant/20" />
@@ -268,7 +249,7 @@ export default function SignInPage() {
               <button
                 type="button"
                 onClick={() => applyToken(demoToken)}
-                className="flex w-full items-center justify-center gap-sm rounded-xl bg-gradient-to-r from-primary-container to-primary px-lg py-md font-label-md text-label-md font-semibold text-on-primary-container shadow-[0_4px_14px_rgba(0,218,243,0.2)] transition-all hover:-translate-y-0.5 hover:shadow-[0_6px_20px_rgba(0,218,243,0.3)]"
+                className="flex w-full items-center justify-center gap-sm rounded-xl bg-primary-fixed-dim hover:bg-primary px-lg py-md font-label-md text-label-md font-semibold text-on-primary-container transition-all"
               >
                 <MaterialIcon name="bolt" size={18} />
                 Continue with demo token
@@ -288,7 +269,7 @@ export default function SignInPage() {
 
             <div className="flex items-center gap-md">
               <span className="h-px flex-1 bg-outline-variant/20" />
-              <span className="font-mono-sm text-[11px] uppercase tracking-widest text-on-surface-variant/60">
+              <span className="font-mono-sm text-[11px] text-on-surface-variant/60">
                 or paste a token
               </span>
               <span className="h-px flex-1 bg-outline-variant/20" />
@@ -335,14 +316,6 @@ export default function SignInPage() {
           </div>
           )}
 
-          <div className="mt-xl flex items-center justify-center gap-sm text-on-surface-variant">
-            <MaterialIcon name="security" size={14} />
-            <span className="font-mono-sm text-[11px]">
-              JWT HS256 · RBAC enforced · Tenant-isolated
-            </span>
-          </div>
-        </div>
-      </div>
-    </main>
+    </AuthShell>
   );
 }

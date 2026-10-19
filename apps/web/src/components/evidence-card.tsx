@@ -23,18 +23,27 @@ export function EvidenceCard({
   return (
     <figure
       id={anchor ? `evidence-${index}` : undefined}
-      className={`rounded-xl border p-md transition-colors ${
+      className={`rounded-lg border p-md transition-colors ${
         active
-          ? "border-primary-fixed-dim bg-primary-fixed-dim/[0.07]"
+          ? "border-primary-fixed-dim bg-surface-container"
           : citation.cited
-            ? "border-outline-variant/40 bg-surface-container-low"
-            : "border-outline-variant/20 bg-transparent opacity-70"
+            ? "border-outline-variant/60 bg-surface-container-low"
+            : "border-outline-variant/30 bg-transparent"
       }`}
     >
-      <figcaption className="flex items-start gap-sm">
+      {citation.snippet ? (
+        <blockquote
+          className={`border-l-[3px] pl-md font-serif text-[15px] leading-[1.65] ${
+            citation.cited ? "border-primary-fixed-dim/80 text-on-surface" : "border-outline-variant text-on-surface-variant"
+          }`}
+        >
+          {citation.snippet}
+        </blockquote>
+      ) : null}
+      <figcaption className={`flex items-start gap-sm ${citation.snippet ? "mt-md" : ""}`}>
         <span
-          className={`mt-[1px] inline-flex h-[22px] min-w-[22px] items-center justify-center rounded-md font-mono-sm text-[12px] ${
-            active ? "bg-primary-fixed-dim text-on-primary-fixed" : "bg-surface-container-high text-primary-fixed-dim"
+          className={`inline-flex h-[22px] min-w-[22px] shrink-0 items-center justify-center rounded font-serif text-[13px] font-semibold ${
+            active ? "bg-primary-fixed-dim text-on-primary-fixed" : "border border-outline-variant text-on-surface"
           }`}
         >
           {index}
@@ -45,7 +54,7 @@ export function EvidenceCard({
               href={link}
               target="_blank"
               rel="noopener noreferrer nofollow"
-              className="truncate text-[14px] font-medium text-primary-fixed-dim underline-offset-2 hover:underline"
+              className="truncate text-[14px] font-medium text-primary underline-offset-2 hover:underline"
               title={link}
             >
               {citation.title}
@@ -55,23 +64,18 @@ export function EvidenceCard({
               {citation.title}
             </span>
           )}
-          <span className="flex flex-wrap items-center gap-x-sm text-[12px] text-on-surface-variant/80">
-            <span className="inline-flex items-center gap-[3px]">
-              <MaterialIcon name={web ? "public" : audio ? "graphic_eq" : "description"} size={13} />
+          <span className="flex flex-wrap items-center gap-x-md text-[12.5px] text-on-surface-variant">
+            <span className="inline-flex items-center gap-[4px]">
+              <MaterialIcon name={web ? "public" : audio ? "graphic_eq" : "description"} size={14} />
               {web ? (link ? new URL(link).hostname : "Web") : location ?? (audio ? "Audio" : "Document")}
             </span>
-            <span className={web ? "rounded bg-tertiary-container/30 px-1 text-on-surface" : undefined}>
+            <span className={web ? "rounded bg-tertiary-container/40 px-1 text-on-surface" : undefined}>
               {web ? "From the web" : "Your workspace"}
             </span>
             {!citation.cited ? <span>Retrieved, not cited</span> : null}
           </span>
         </span>
       </figcaption>
-      {citation.snippet ? (
-        <blockquote className="mt-sm border-l-2 border-outline-variant/40 pl-sm text-[13.5px] leading-relaxed text-on-surface-variant">
-          {citation.snippet}
-        </blockquote>
-      ) : null}
     </figure>
   );
 }

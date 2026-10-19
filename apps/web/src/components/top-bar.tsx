@@ -471,7 +471,7 @@ export function TopBar({ searchPlaceholder = "Search workspace..." }: TopBarProp
                     {roles.map((role) => (
                       <span
                         key={role}
-                        className="rounded border border-outline-variant/20 bg-surface-container px-sm py-0.5 font-mono-sm text-[10px] uppercase tracking-wider text-primary-fixed-dim"
+                        className="rounded border border-outline-variant/20 bg-surface-container px-sm py-0.5 font-mono-sm text-[10px] text-primary-fixed-dim"
                       >
                         {role}
                       </span>

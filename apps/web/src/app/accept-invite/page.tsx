@@ -136,7 +136,7 @@ export default function AcceptInvitePage() {
               </p>
               <div className="mt-sm flex items-center gap-sm">
                 <span className="font-body-md text-[13px] text-on-surface-variant">{preview.email}</span>
-                <span className="rounded border border-outline-variant/20 bg-surface-bright px-sm py-0.5 font-mono-sm text-[10px] uppercase tracking-wider text-primary-fixed-dim">
+                <span className="rounded border border-outline-variant/20 bg-surface-bright px-sm py-0.5 font-mono-sm text-[10px] text-primary-fixed-dim">
                   {preview.role}
                 </span>
               </div>

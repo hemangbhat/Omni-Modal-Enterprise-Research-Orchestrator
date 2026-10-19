@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { AuthShell } from "@/components/auth-shell";
 import { MaterialIcon } from "@/components/material-icon";
 import { useAuth } from "@/components/auth-context";
 import { setStoredEmail } from "@/lib/auth";
@@ -58,25 +59,7 @@ export default function SignUpPage() {
   }
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center bg-surface px-lg">
-      <div className="w-full max-w-md">
-        <div className="mb-xl flex items-center justify-center gap-md">
-          <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary-fixed-dim text-on-primary-fixed shadow-[0_0_20px_rgba(0,218,243,0.3)]">
-            <MaterialIcon name="science" size={22} fill />
-          </span>
-          <div>
-            <h1 className="font-headline-md text-headline-md font-black tracking-tight text-on-surface">
-              OMERO
-            </h1>
-            <p className="font-mono-sm text-mono-sm text-primary-fixed-dim/80">AI Research Platform</p>
-          </div>
-        </div>
-
-        <div className="premium-card rounded-2xl p-xl">
-          <h2 className="mb-sm font-headline-md text-headline-md text-on-surface">Create your account</h2>
-          <p className="mb-xl font-body-md text-body-md text-on-surface-variant">
-            Sign up to provision your organization. Your password is hashed (PBKDF2) and never stored in plain text.
-          </p>
+    <AuthShell title="Create your account" intro="A new workspace starts empty and private to your team. You can invite colleagues once you're in.">
 
           {error ? (
             <div className="mb-lg rounded-xl border border-error/30 bg-error-container/20 px-lg py-md font-body-md text-[14px] text-error">
@@ -112,7 +95,7 @@ export default function SignUpPage() {
             <button
               type="submit"
               disabled={submitting}
-              className="flex w-full items-center justify-center gap-sm rounded-xl bg-gradient-to-r from-primary-container to-primary px-lg py-md font-label-md text-label-md font-semibold text-on-primary-container shadow-[0_4px_14px_rgba(0,218,243,0.2)] transition-all hover:-translate-y-0.5 hover:shadow-[0_6px_20px_rgba(0,218,243,0.3)] disabled:opacity-60"
+              className="flex w-full items-center justify-center gap-sm rounded-xl bg-primary-fixed-dim hover:bg-primary px-lg py-md font-label-md text-label-md font-semibold text-on-primary-container transition-all disabled:opacity-60"
             >
               {submitting ? (
                 <span className="h-4 w-4 animate-spin rounded-full border-2 border-on-primary-container/40 border-t-on-primary-container" />
@@ -130,12 +113,6 @@ export default function SignUpPage() {
             </Link>
           </p>
 
-          <div className="mt-xl flex items-center justify-center gap-sm text-on-surface-variant">
-            <MaterialIcon name="security" size={14} />
-            <span className="font-mono-sm text-[11px]">PBKDF2-hashed · JWT HS256 · Tenant-isolated</span>
-          </div>
-        </div>
-      </div>
-    </main>
+    </AuthShell>
   );
 }

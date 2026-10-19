@@ -185,7 +185,7 @@ export default function BillingPage() {
                       key={plan.id}
                       className={`flex flex-col rounded-2xl border p-lg transition-all ${
                         isCurrent
-                          ? "border-primary-fixed-dim bg-surface-container-low shadow-[0_0_24px_rgba(0,218,243,0.12)]"
+                          ? "border-primary-fixed-dim bg-surface-container-low"
                           : "border-outline-variant/30 bg-surface-container-low hover:border-outline-variant/60"
                       }`}
                     >
@@ -194,7 +194,7 @@ export default function BillingPage() {
                           {plan.name}
                         </h3>
                         {isCurrent ? (
-                          <span className="rounded-full border border-primary-fixed-dim/40 bg-primary/10 px-sm py-0.5 font-mono-sm text-[10px] uppercase tracking-wider text-primary-fixed-dim">
+                          <span className="rounded-full border border-primary-fixed-dim/40 bg-primary/10 px-sm py-0.5 font-mono-sm text-[10px] text-primary-fixed-dim">
                             Current
                           </span>
                         ) : null}

@@ -88,7 +88,7 @@ export default function AdminPage() {
                 {/* Org card + adapters */}
                 <div className="grid grid-cols-1 gap-lg md:grid-cols-2">
                   <div className="rounded-xl border border-outline-variant/30 bg-surface-container-low p-lg">
-                    <h3 className="mb-md font-label-md text-label-md uppercase tracking-wider text-on-surface-variant">
+                    <h3 className="mb-md font-label-md text-label-md text-on-surface-variant">
                       Organization
                     </h3>
                     <dl className="flex flex-col gap-sm font-body-md text-[13px]">
@@ -100,7 +100,7 @@ export default function AdminPage() {
                   </div>
 
                   <div className="rounded-xl border border-outline-variant/30 bg-surface-container-low p-lg">
-                    <h3 className="mb-md font-label-md text-label-md uppercase tracking-wider text-on-surface-variant">
+                    <h3 className="mb-md font-label-md text-label-md text-on-surface-variant">
                       Active adapters
                     </h3>
                     <dl className="flex flex-col gap-sm font-body-md text-[13px]">
@@ -117,7 +117,7 @@ export default function AdminPage() {
 
                 {/* Event counts */}
                 <div className="rounded-xl border border-outline-variant/30 bg-surface-container-low p-lg">
-                  <h3 className="mb-md font-label-md text-label-md uppercase tracking-wider text-on-surface-variant">
+                  <h3 className="mb-md font-label-md text-label-md text-on-surface-variant">
                     Product events
                   </h3>
                   {Object.keys(stats.event_counts).length === 0 ? (

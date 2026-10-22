@@ -23,7 +23,7 @@ How to present OMERO in a technical interview: the pitch, a demo you can run, th
 |---|---|
 | Local, no keys, no database | Everything works: in-memory stores, hashing embeddings, extractive answers. This is the demo to show. |
 | Local with Postgres | All 15 migrations apply to an empty pgvector database. The restart and Postgres tests pass against a throwaway container. |
-| Deployed (Vercel + Render + Neon + S3) | Configured, but the latest milestones are on local `main` and not yet pushed or deployed. Migrations 0010 to 0015 still have to be run on Neon. **Don't say "it's live" unless you have deployed and checked it.** |
+| Deployed (Vercel + Render + Neon + S3) | **Live** at https://omni-modal-enterprise-research-orch.vercel.app with the latest code: sign-up, upload to S3, cited AI answers (Groq), projects and reports checked end to end on 2026-10-19. The API sleeps when idle on Render's free tier, so open the site a minute before the interview to wake it. |
 | Web research | Built and tested with a fake provider. Needs a free Tavily key to run for real. |
 
 ---
@@ -137,7 +137,7 @@ Use the STAR shape. Each story has files to open if they ask "show me".
 
 | Claim | Source / command |
 |---|---|
-| 766 backend tests, 136 frontend tests, 31 Playwright checks | `python -m pytest tests` · `npm run test:frontend` · `npm run test:e2e` |
+| 776 backend tests, 137 frontend tests, 32 Playwright checks | `python -m pytest tests` · `npm run test:frontend` · `npm run test:e2e` |
 | 8 Postgres-only tests (migrations, restart, isolation) | `OMERO_TEST_DATABASE_URL=… pytest tests/test_postgres_*.py tests/test_cross_tenant_routes.py` |
 | Hybrid retrieval: recall@1 0.589 → 0.768 (hashing) | `python -m omni_modal.benchmark.eval` |
 | 30 id routes covered by the cross-tenant test | `tests/test_cross_tenant_routes.py` |
@@ -189,7 +189,7 @@ The no-model snippet choice ("supported citation" 0.71), and the hashing embedde
 
 ## 10. Honest limitations
 
-- The deployed site doesn't yet run the latest code (migrations 0010–0015 are pending on Neon).
+- Render's free tier sleeps when idle; the first request after a pause takes up to a minute.
 - Deployment uses hashing embeddings (word overlap) because of the free tier's memory limit; hybrid search compensates and is measured.
 - There's no reranker, and web research hasn't been run against the real provider yet.
 - The SaaS tables are missing from the Drizzle schema file (the SQL migrations are the source of truth).
@@ -206,7 +206,7 @@ Saying these first, plainly, is a strength. It shows you know the system better 
 - Added hybrid retrieval (pgvector + Postgres full-text, reciprocal rank fusion) and proved it on a labelled 56-question corpus: top-1 accuracy 59% → 77%, MRR 0.68 → 0.84, with a CI regression gate.
 - Designed durable ingestion for a free-tier host: presigned S3 uploads, Postgres job records with atomic claims, retries with backoff, and resume on restart; verified by a two-process restart test on real Postgres.
 - Proved tenant isolation with a test that attacks all 30 id-taking routes, plus a coverage check that fails on new uncovered routes; it runs in CI against a pgvector service container and caught a route that answered other tenants' ids with 200 instead of 404.
-- 766 backend, 136 frontend and 31 Playwright tests, including axe-core accessibility checks at desktop and phone width; the tests found and fixed a broken migration, a lock-out rate limit and a dead cache.
+- 776 backend, 137 frontend and 32 Playwright tests, including axe-core accessibility checks at desktop and phone width; the tests found and fixed a broken migration, a lock-out rate limit and a dead cache.
 
 ---
 

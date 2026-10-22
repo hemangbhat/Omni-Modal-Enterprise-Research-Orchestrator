@@ -12,7 +12,7 @@ A multi-tenant enterprise research platform that ingests PDF and audio documents
 - **Observability** — Sentry distributed tracing across frontend and backend, property-based tests for correctness
 - **Enterprise security** — JWT authentication, RBAC, document-level access control, PII scrubbing, rate limiting, content redaction before external delegation
 - **Performance** — async ingestion queue, connection pooling, query result caching, batch embedding writes
-- **Test quality** — 751 backend tests (unit, HTTP integration, Hypothesis property-based) and 130 frontend tests (API clients and screen-level tests of sign-in, two-step sign-in, password reset, research, the assistant, projects, the dashboard and the document library); CI is configured to run both suites
+- **Test quality** — 776 backend tests (unit, HTTP integration, Hypothesis property-based), 137 frontend tests and 32 browser checks (API clients and screen-level tests of sign-in, two-step sign-in, password reset, research, the assistant, projects, the dashboard and the document library); CI is configured to run both suites
 - **Works locally without a database** — a Postgres-free in-memory path wires ingestion → persistence → retrieval end-to-end so the demo runs out of the box (with a deterministic, non-semantic embedder)
 
 ---
@@ -273,7 +273,7 @@ Model defaults: `GROQ_MODEL=openai/gpt-oss-120b`, `GEMINI_MODEL=gemini-flash-lat
 ### Tests
 
 ```bash
-# Backend unit, property-based and HTTP integration tests (751 tests).
+# Backend unit, property-based and HTTP integration tests (776 tests).
 # The suite never reads your .env, so it does not use your real keys or database.
 cd services/api && python -m pytest tests
 

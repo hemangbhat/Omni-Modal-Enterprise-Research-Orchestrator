@@ -31,7 +31,7 @@ services:
 
       # ── Embeddings ────────────────────────────────────────────────────────
       - key: EMBEDDING_BACKEND
-        value: hashing
+        value: fastembed
 
       - key: EMBEDDING_DIMENSIONS
         value: "384"
@@ -111,7 +111,7 @@ services:
       - key: GROQ_MODEL
         value: openai/gpt-oss-120b
       - key: EMBEDDING_BACKEND
-        value: hashing
+        value: fastembed
       - key: EMBEDDING_DIMENSIONS
         value: "384"
       - key: SENTRY_DSN

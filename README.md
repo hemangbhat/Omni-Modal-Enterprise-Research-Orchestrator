@@ -12,7 +12,7 @@ A multi-tenant enterprise research platform that ingests PDF and audio documents
 - **Observability** — Sentry distributed tracing across frontend and backend, property-based tests for correctness
 - **Enterprise security** — JWT authentication, RBAC, document-level access control, PII scrubbing, rate limiting, content redaction before external delegation
 - **Performance** — async ingestion queue, connection pooling, query result caching, batch embedding writes
-- **Test quality** — 776 backend tests (unit, HTTP integration, Hypothesis property-based), 137 frontend tests and 32 browser checks (API clients and screen-level tests of sign-in, two-step sign-in, password reset, research, the assistant, projects, the dashboard and the document library); CI is configured to run both suites
+- **Test quality** — 787 backend tests (unit, HTTP integration, Hypothesis property-based), 137 frontend tests and 32 browser checks (API clients and screen-level tests of sign-in, two-step sign-in, password reset, research, the assistant, projects, the dashboard and the document library); CI is configured to run both suites
 - **Works locally without a database** — a Postgres-free in-memory path wires ingestion → persistence → retrieval end-to-end so the demo runs out of the box (with a deterministic, non-semantic embedder)
 
 ---
@@ -273,7 +273,7 @@ Model defaults: `GROQ_MODEL=openai/gpt-oss-120b`, `GEMINI_MODEL=gemini-flash-lat
 ### Tests
 
 ```bash
-# Backend unit, property-based and HTTP integration tests (776 tests).
+# Backend unit, property-based and HTTP integration tests (787 tests).
 # The suite never reads your .env, so it does not use your real keys or database.
 cd services/api && python -m pytest tests
 
@@ -415,14 +415,28 @@ cd services/api
 python -m omni_modal.benchmark.eval --backends hashing,sentence-transformers
 ```
 
-Measured on 2026-10-18 (`eval/results.json`):
+Measured on 2026-10-22 (`eval/results.json`):
 
 | Embeddings | Retrieval | Recall@1 | Recall@5 | MRR | Supported citation |
 |---|---|---|---|---|---|
-| hashing (deployed) | vector | 0.589 | 0.821 | 0.681 | 0.607 |
-| hashing (deployed) | **hybrid** | **0.768** | **0.929** | **0.839** | **0.714** |
+| hashing (old deployment) | vector | 0.589 | 0.821 | 0.681 | 0.607 |
+| hashing (old deployment) | hybrid | 0.768 | 0.929 | 0.839 | 0.714 |
 | all-MiniLM-L6-v2 (local) | vector | 0.786 | 0.946 | 0.853 | 0.679 |
-| all-MiniLM-L6-v2 (local) | **hybrid** | **0.821** | 0.929 | **0.871** | **0.696** |
+| all-MiniLM-L6-v2 (local) | hybrid | 0.821 | 0.929 | 0.871 | 0.696 |
+| **bge-small-en-v1.5 (deployed)** | vector | **0.839** | **0.982** | **0.899** | 0.714 |
+| **bge-small-en-v1.5 (deployed)** | **hybrid** | 0.821 | 0.964 | 0.888 | **0.732** |
+
+- **Deployed embeddings:** Hugging Face `BAAI/bge-small-en-v1.5` in ONNX form (`fastembed`), run inside the API.
+  It is the most accurate model measured, makes 384-dim vectors (the size of the database column, so no schema
+  change), and uses about 300 MB on first use, which fits Render's 512 MB free tier (measured about 350 MB with every
+  production library loaded). Hugging Face's hosted API was the first idea, but free accounts no longer include
+  credits for it. The model is baked into the Docker image, loads on first use, and if it cannot load or run, search
+  falls back to keyword ranking and `/health/ready` says so.
+- **Why hybrid stays on with bge-small,** although vector search alone wins by one question: hybrid quotes the
+  supporting sentence more often, keeps exact names and codes findable, and keeps documents findable by keywords
+  while they wait to be re-embedded. Vector search only compares vectors made by the current model.
+- **Switching models:** set `EMBEDDING_BACKEND=fastembed`, deploy, then run `python scripts/reembed.py` once with
+  `DATABASE_URL` set. It re-embeds stored chunk text in batches (no re-reading files) and can be stopped and resumed.
 
 - **Hybrid** runs keyword search (BM25 in memory, Postgres full-text search in production) next to
   vector search and merges the two rankings with reciprocal rank fusion. It raises top-1 accuracy for
@@ -673,7 +687,7 @@ Audited on 2026-10-11 against the target product description. These are not buil
 - **Research:** no reranker. Without a language model, the quoted snippet is chosen by word overlap and is sometimes not the sentence that answers (measured above as "supported citation").
 - **Web research:** needs `TAVILY_API_KEY` (free plan). Gemini with Google Search grounding was the first choice, but it is not on the free tier for current Gemini models. Web results are not cached, and the older generic A2A delegation client is still present but off.
 - **Plans:** the web research feature and its monthly allowance are enforced; the other plan flags (SSO, audit export, priority ingest) are not implemented, so the pricing and billing pages list only what is enforced.
-- **Deployment:** the Render free tier runs the hashing embedder, which is not semantic.
+- **Deployment:** embeddings run inside the API on a 512 MB server; a heavy upload burst could still exhaust memory. A paid instance or a hosted embedding API would remove that limit.
 - **Frontend:** `npm run lint` is broken (`next lint` was removed in Next.js 16). The browser test covers one journey, not every page.
 - **Rate limits:** every signed-in request counts against a per-user limit (300 a minute) and per-tenant limit (1,200); questions, the assistant and uploads also count against a stricter one (20 and 60). Set with `RATE_LIMIT_*` variables.
 - **Docker image:** the image with the new dependency set has not been built locally; the first Render deploy is its first build.

@@ -8,12 +8,14 @@ keeps the local/offline demo working and never crashes startup.
 
 Environment variables
 ----------------------
-EMBEDDING_BACKEND          hashing | openai | sentence-transformers  (default: hashing)
+EMBEDDING_BACKEND          hashing | openai | sentence-transformers | fastembed  (default: hashing)
 EMBEDDING_DIMENSIONS       int, default 1536 (used by hashing + openai)
 OPENAI_API_KEY             required when EMBEDDING_BACKEND=openai
 OPENAI_EMBEDDING_MODEL     default text-embedding-3-small
 OPENAI_BASE_URL            default https://api.openai.com/v1
 SENTENCE_TRANSFORMERS_MODEL default sentence-transformers/all-MiniLM-L6-v2
+FASTEMBED_MODEL            default BAAI/bge-small-en-v1.5 (Hugging Face, ONNX, runs in-process)
+FASTEMBED_CACHE_DIR        where the model files are (baked into the Docker image)
 """
 from __future__ import annotations
 
@@ -29,7 +31,7 @@ from omni_modal.qa.embeddings import (
     SentenceTransformerEmbeddingProvider,
 )
 
-VALID_BACKENDS = ("hashing", "openai", "sentence-transformers")
+VALID_BACKENDS = ("hashing", "openai", "sentence-transformers", "fastembed")
 
 
 @dataclass(frozen=True)
@@ -44,7 +46,12 @@ class EmbeddingSelection:
 
     @property
     def is_semantic(self) -> bool:
-        return self.backend in ("openai", "sentence-transformers")
+        return self.backend in ("openai", "sentence-transformers", "fastembed")
+
+    @property
+    def model_id(self) -> str:
+        """Stored with every vector; search only compares vectors from the same model."""
+        return str(getattr(self.provider, "model_id", None) or self.backend)
 
 
 def _int_env(name: str, default: int) -> int:
@@ -87,6 +94,24 @@ def select_embedding_provider(
             provider=HashingQueryEmbeddingProvider(dimensions=dimensions),
             backend="hashing",
             requested_backend="hashing",
+            fell_back=False,
+        )
+
+    if requested == "fastembed":
+        try:
+            import fastembed  # noqa: F401, PLC0415
+        except ImportError:
+            reason = "EMBEDDING_BACKEND=fastembed but the fastembed package is not installed; using hashing fallback."
+            observability.capture_message(reason, operation="embeddings.factory", level="error")
+            return _hashing_fallback("fastembed", dimensions, reason)
+        from omni_modal.qa.fastembed_provider import FastEmbedProvider  # noqa: PLC0415
+
+        # Loads lazily on first use; a failure then degrades search to keywords.
+        return EmbeddingSelection(
+            provider=FastEmbedProvider(environ.get("FASTEMBED_MODEL") or None,
+                                       cache_dir=environ.get("FASTEMBED_CACHE_DIR") or None),
+            backend="fastembed",
+            requested_backend="fastembed",
             fell_back=False,
         )
 

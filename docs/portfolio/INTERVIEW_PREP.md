@@ -99,6 +99,16 @@ Use the STAR shape. Each story has files to open if they ask "show me".
 - **Files:** `qa/lexical.py`, `qa/retrieval.py`, `benchmark/eval.py`, `eval/corpus.json`.
 - **Reproduce:** `cd services/api && python -m omni_modal.benchmark.eval --backends hashing,sentence-transformers`
 
+### 6.1a A real embedding model on a 512 MB server
+- **Problem:** the free host has 512 MB, so the deployment used "hashing" vectors (word overlap).
+- **Options weighed:** Hugging Face's hosted API (no longer free), sentence-transformers with PyTorch (too much memory),
+  or a small Hugging Face model in ONNX form inside the API.
+- **Decision and evidence:** `BAAI/bge-small-en-v1.5` via `fastembed`. Measured best on the eval (vector recall@1 0.839,
+  recall@5 0.982, MRR 0.899 vs hashing hybrid 0.768 / 0.929 / 0.839), 384-dim so no schema change, about 350 MB with the
+  whole app loaded. Safety: the model is baked into the image, loads on first use, search falls back to keywords if it
+  fails, vectors are tagged by model so old and new are never compared, and `scripts/reembed.py` converts stored chunks.
+- **Files:** `qa/fastembed_provider.py`, `qa/retrieval.py`, `scripts/reembed.py`, `tests/test_fastembed_embeddings.py`.
+
 ### 6.1b LangChain: measured, not assumed
 - **Question you'll get:** "Why didn't you use LangChain?"
 - **Answer:** I did, as an adapter in both directions, and measured it. OMERO's search works as a LangChain retriever and
@@ -145,7 +155,7 @@ Use the STAR shape. Each story has files to open if they ask "show me".
 
 | Claim | Source / command |
 |---|---|
-| 776 backend tests, 137 frontend tests, 32 Playwright checks | `python -m pytest tests` · `npm run test:frontend` · `npm run test:e2e` |
+| 787 backend tests, 137 frontend tests, 32 Playwright checks | `python -m pytest tests` · `npm run test:frontend` · `npm run test:e2e` |
 | 8 Postgres-only tests (migrations, restart, isolation) | `OMERO_TEST_DATABASE_URL=… pytest tests/test_postgres_*.py tests/test_cross_tenant_routes.py` |
 | Hybrid retrieval: recall@1 0.589 → 0.768 (hashing) | `python -m omni_modal.benchmark.eval` |
 | 30 id routes covered by the cross-tenant test | `tests/test_cross_tenant_routes.py` |
@@ -198,7 +208,7 @@ The no-model snippet choice ("supported citation" 0.71), and the hashing embedde
 ## 10. Honest limitations
 
 - Render's free tier sleeps when idle; the first request after a pause takes up to a minute.
-- Deployment uses hashing embeddings (word overlap) because of the free tier's memory limit; hybrid search compensates and is measured.
+- Embeddings run inside the API on a 512 MB server; a heavy burst of uploads could still run out of memory.
 - There's no reranker, and web research hasn't been run against the real provider yet.
 - The SaaS tables are missing from the Drizzle schema file (the SQL migrations are the source of truth).
 - Some plan flags (SSO, audit export, priority ingest) are listed in the plan table but not implemented. The pricing page shows only what's enforced.
@@ -214,7 +224,7 @@ Saying these first, plainly, is a strength. It shows you know the system better 
 - Added hybrid retrieval (pgvector + Postgres full-text, reciprocal rank fusion) and proved it on a labelled 56-question corpus: top-1 accuracy 59% → 77%, MRR 0.68 → 0.84, with a CI regression gate.
 - Designed durable ingestion for a free-tier host: presigned S3 uploads, Postgres job records with atomic claims, retries with backoff, and resume on restart; verified by a two-process restart test on real Postgres.
 - Proved tenant isolation with a test that attacks all 30 id-taking routes, plus a coverage check that fails on new uncovered routes; it runs in CI against a pgvector service container and caught a route that answered other tenants' ids with 200 instead of 404.
-- 776 backend, 137 frontend and 32 Playwright tests, including axe-core accessibility checks at desktop and phone width; the tests found and fixed a broken migration, a lock-out rate limit and a dead cache.
+- 787 backend, 137 frontend and 32 Playwright tests, including axe-core accessibility checks at desktop and phone width; the tests found and fixed a broken migration, a lock-out rate limit and a dead cache.
 
 ---
 

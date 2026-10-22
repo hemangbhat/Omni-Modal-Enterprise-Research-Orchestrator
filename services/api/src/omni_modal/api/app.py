@@ -289,10 +289,10 @@ def _build_runtime() -> None:
         from omni_modal.qa.pg_persistence import PostgresChunkPersistence  # noqa: PLC0415
 
         state.vector_store = None
-        retriever = PgVectorChunkRetriever(provider, cache=state.query_cache)
+        retriever = PgVectorChunkRetriever(provider, cache=state.query_cache, model_id=selection.model_id)
         persistence = PostgresChunkPersistence(
             provider, database_url=os.environ.get("DATABASE_URL"),
-            embedding_model=selection.backend,
+            embedding_model=selection.model_id,
             dimensions=getattr(provider, "dimensions", 384),
             require_document=True,
         )
@@ -368,6 +368,17 @@ _model_status_cache: dict[str, object] = {"at": 0.0, "value": ""}
 
 
 _model_status_lock = threading.Lock()
+
+
+def _embedding_status() -> str:
+    """Which model makes search vectors; never loads it (it loads on first use)."""
+    provider = getattr(state.retriever, "_embedding_provider", None) or getattr(state.retriever, "_provider", None)
+    model_id = str(getattr(provider, "model_id", None) or type(provider).__name__)
+    error = getattr(provider, "last_error", None)
+    if error:
+        return f"{model_id}: unavailable, search uses keywords only"
+    loaded = getattr(provider, "loaded", None)
+    return f"{model_id} ({'loaded' if loaded else 'loads on first use'})" if loaded is not None else model_id
 
 
 def _refresh_model_status() -> None:
@@ -598,6 +609,7 @@ def create_app() -> FastAPI:
         # The model provider is optional (answers fall back to extracts without it),
         # so its state is reported but never makes the service "not ready".
         checks["model_provider"] = _model_provider_status()
+        checks["embeddings"] = _embedding_status()
 
         body = {"status": "ready" if ok else "not_ready", "checks": checks}
         return JSONResponse(body, status_code=200 if ok else 503)

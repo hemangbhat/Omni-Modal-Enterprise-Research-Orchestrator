@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 
 from omni_modal.ingestion.models import IngestionResult
 from omni_modal.qa.embeddings import QueryEmbeddingProvider
+from omni_modal.qa.fastembed_provider import EmbeddingUnavailable
 from omni_modal.qa.lexical import bm25_scores, candidate_depth, reciprocal_rank_fusion, retrieval_mode
 from omni_modal.qa.models import QueryRequest, RetrievedChunk
 
@@ -181,15 +182,24 @@ class InMemoryChunkRetriever:
         candidates = self._candidates(request)
         if not candidates or top_k == 0:
             return []
-        query_embedding = self._provider.embed_query(request.question)
-        similarity = {c.chunk_id: cosine_similarity(query_embedding, c.embedding) for c in candidates}
+        try:
+            query_embedding = self._provider.embed_query(request.question)
+        except EmbeddingUnavailable:
+            query_embedding = None  # the model could not load or run: keyword ranking only
+        similarity = {
+            c.chunk_id: cosine_similarity(query_embedding, c.embedding) if query_embedding is not None else 0.0
+            for c in candidates
+        }
         by_id = {c.chunk_id: c for c in candidates}
 
         def keep(chunk_id: str) -> bool:
             return not (request.min_similarity > 0 and similarity[chunk_id] < request.min_similarity)
 
-        vector_ranking = [cid for cid in sorted(similarity, key=lambda cid: similarity[cid], reverse=True) if keep(cid)]
-        if self.mode == "hybrid":
+        vector_ranking = (
+            [cid for cid in sorted(similarity, key=lambda cid: similarity[cid], reverse=True) if keep(cid)]
+            if query_embedding is not None else []
+        )
+        if self.mode == "hybrid" or query_embedding is None:
             depth = candidate_depth(top_k)
             keyword = bm25_scores(request.question, [c.content for c in candidates])
             keyword_ranking = [

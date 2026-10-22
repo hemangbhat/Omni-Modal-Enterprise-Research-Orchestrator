@@ -46,6 +46,11 @@ api = [
     "python-multipart>=0.0.9",
 ]
 
+# Hugging Face bge-small embeddings in ONNX form, run inside the API (~300 MB).
+embeddings = [
+    "fastembed>=0.9",
+]
+
 # OMERO search as a LangChain retriever/tool, and LangChain hybrid retrieval
 # compared in the evaluation. Not used by the deployed API.
 langchain = [

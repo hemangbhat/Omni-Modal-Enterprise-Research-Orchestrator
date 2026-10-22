@@ -5,6 +5,7 @@ import os
 from typing import Protocol
 
 from omni_modal.qa.embeddings import QueryEmbeddingProvider
+from omni_modal.qa.fastembed_provider import EmbeddingUnavailable
 from omni_modal.qa.lexical import candidate_depth, reciprocal_rank_fusion, retrieval_mode, tsquery_text
 from omni_modal.qa.models import QueryRequest, RetrievedChunk
 from omni_modal.observability import observability
@@ -38,8 +39,11 @@ class PgVectorChunkRetriever:
         pool: "ConnectionPool | None" = None,
         cache: "QueryCache | None" = None,
         mode: str | None = None,
+        model_id: str | None = None,
     ) -> None:
         self.mode = mode or retrieval_mode()
+        # Vector search only compares vectors made by this model (None: any).
+        self.model_id = model_id
         self._embedding_provider = embedding_provider
         self._database_url = database_url or os.environ.get("DATABASE_URL")
         self._pool = pool
@@ -94,6 +98,10 @@ class PgVectorChunkRetriever:
             with observability.child_span("retrieval.embed", "generate query embedding"):
                 try:
                     embedding = self._embedding_provider.embed_query(request.question)
+                except EmbeddingUnavailable as exc:
+                    # The model could not load or run: rank by keywords alone.
+                    observability.capture_exception(exc, operation="retrieval.embedding.degraded")
+                    embedding = None
                 except Exception as exc:
                     observability.capture_exception(
                         exc,
@@ -106,7 +114,7 @@ class PgVectorChunkRetriever:
                     )
                     raise
 
-            vector_literal = "[" + ",".join(str(value) for value in embedding) + "]"
+            vector_literal = None if embedding is None else "[" + ",".join(str(value) for value in embedding) + "]"
             scope = None if request.document_ids is None else list(request.document_ids)
 
             # --- Search sub-span ---
@@ -185,9 +193,7 @@ class PgVectorChunkRetriever:
                     self._cache.set(_cache_key, results, tenant_id=request.tenant_id)
                 return results
 
-    _COLUMNS = """
-        c.id as chunk_id, d.id as document_id, d.title, d.source_type, c.chunk_index, c.content,
-        1 - (e.embedding <=> %s::vector) as similarity, c.metadata
+    _FROM = """
         from embeddings e
         inner join document_chunks c on c.id = e.chunk_id
         inner join documents d on d.id = e.document_id
@@ -195,31 +201,51 @@ class PgVectorChunkRetriever:
           and d.status = 'ready'
           and d.archived_at is null
           and (%s::uuid[] is null or d.id = any(%s::uuid[]))
-          and (%s = 0 or 1 - (e.embedding <=> %s::vector) >= %s)
     """
+    _SELECT = "c.id as chunk_id, d.id as document_id, d.title, d.source_type, c.chunk_index, c.content, c.metadata"
 
-    def _search(self, cursor, request: QueryRequest, vector_literal: str, scope) -> list[dict]:
-        """The vector ranking, fused with the full-text ranking in hybrid mode."""
-        filters = (vector_literal, request.tenant_id, scope, scope, request.min_similarity,
-                   vector_literal, request.min_similarity)
-        hybrid = self.mode == "hybrid" and tsquery_text(request.question) is not None
+    def _search(self, cursor, request: QueryRequest, vector_literal: str | None, scope) -> list[dict]:
+        """The vector ranking, fused with the full-text ranking in hybrid mode.
+
+        With no query vector (the embedding model is unavailable) only the
+        full-text ranking runs, so search degrades instead of failing. Vector
+        search compares only vectors from the current model; full-text search
+        covers every chunk, so documents not yet re-embedded stay findable.
+        """
+        where = (request.tenant_id, scope, scope)
+        has_terms = tsquery_text(request.question) is not None
+        hybrid = self.mode == "hybrid" and has_terms
         limit = candidate_depth(request.top_k) if hybrid else request.top_k
-        cursor.execute(
-            f"select {self._COLUMNS} order by e.embedding <=> %s::vector limit %s",
-            (*filters, vector_literal, limit),
-        )
-        vector_rows = cursor.fetchall()
-        if not hybrid:
-            return vector_rows
+        vector_rows: list[dict] = []
+        if vector_literal is not None:
+            cursor.execute(
+                f"""select {self._SELECT}, 1 - (e.embedding <=> %s::vector) as similarity {self._FROM}
+                      and (%s::text is null or e.embedding_model = %s)
+                      and (%s = 0 or 1 - (e.embedding <=> %s::vector) >= %s)
+                    order by e.embedding <=> %s::vector limit %s""",
+                (vector_literal, *where, self.model_id, self.model_id, request.min_similarity,
+                 vector_literal, request.min_similarity, vector_literal, limit),
+            )
+            vector_rows = cursor.fetchall()
+            if not hybrid:
+                return vector_rows
+        elif not has_terms:
+            return []
         tsquery = tsquery_text(request.question)
+        if vector_literal is not None:
+            similarity, sim_params = "1 - (e.embedding <=> %s::vector)", (vector_literal,)
+        else:
+            similarity, sim_params = "0.0", ()
         cursor.execute(
-            f"""select {self._COLUMNS}
+            f"""select {self._SELECT}, {similarity} as similarity {self._FROM}
                   and to_tsvector('english', c.content) @@ to_tsquery('english', %s)
                 order by ts_rank_cd(to_tsvector('english', c.content), to_tsquery('english', %s)) desc
                 limit %s""",
-            (*filters, tsquery, tsquery, limit),
+            (*sim_params, *where, tsquery, tsquery, candidate_depth(request.top_k)),
         )
         keyword_rows = cursor.fetchall()
+        if vector_literal is None:
+            return keyword_rows[: max(0, request.top_k)]
         by_id = {str(r["chunk_id"]): r for r in [*vector_rows, *keyword_rows]}
         ranked = reciprocal_rank_fusion([
             [str(r["chunk_id"]) for r in vector_rows], [str(r["chunk_id"]) for r in keyword_rows],

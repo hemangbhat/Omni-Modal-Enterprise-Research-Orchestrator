@@ -87,6 +87,12 @@ def _provider(backend: str):
         if selection.backend != "sentence-transformers":
             raise RuntimeError(selection.reason or "sentence-transformers is not available")
         return selection.provider
+    if backend == "fastembed":
+        from omni_modal.qa.fastembed_provider import FastEmbedProvider  # noqa: PLC0415
+
+        provider = FastEmbedProvider()
+        provider.embed_query("warm up")  # fail here, not mid-run, if the model is missing
+        return provider
     raise ValueError(f"Unknown backend {backend!r}")
 
 
@@ -191,7 +197,8 @@ def _table(report: dict) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--backends", default="hashing", help="comma-separated: hashing,sentence-transformers")
+    parser.add_argument("--backends", default="hashing",
+                        help="comma-separated: hashing,sentence-transformers,fastembed")
     parser.add_argument("--output", help="write the JSON report here")
     parser.add_argument("--check", help="fail on a regression against this committed report")
     parser.add_argument("--margin", type=float, default=0.02)

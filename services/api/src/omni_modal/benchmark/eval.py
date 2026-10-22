@@ -37,6 +37,26 @@ from omni_modal.qa.synthesis import ExtractiveAnswerSynthesizer
 CORPUS = Path(__file__).resolve().parents[3] / "eval" / "corpus.json"
 TENANT = "eval-tenant"
 MODES = ("vector", "hybrid")
+# The same two strategies built from LangChain parts (optional extra).
+LANGCHAIN_MODES = ("langchain-vector", "langchain-hybrid")
+
+
+def langchain_available() -> bool:
+    try:
+        import langchain_classic.retrievers  # noqa: F401, PLC0415
+        import langchain_community.retrievers  # noqa: F401, PLC0415
+        import rank_bm25  # noqa: F401, PLC0415
+    except ImportError:
+        return False
+    return True
+
+
+def _retriever(mode: str, provider, store):
+    if mode.startswith("langchain-"):
+        from omni_modal.integrations.langchain_adapter import LangChainHybridRetriever  # noqa: PLC0415
+
+        return LangChainHybridRetriever(provider, store, mode=mode.removeprefix("langchain-"))
+    return InMemoryChunkRetriever(provider, store, mode=mode)
 
 
 @dataclass
@@ -98,7 +118,7 @@ def _summary(rows: list[dict]) -> dict:
 def evaluate(corpus: dict, backend: str, mode: str, provider=None) -> tuple[Scores, list[dict]]:
     provider = provider or _provider(backend)
     store = build_store(corpus, provider)
-    retriever = InMemoryChunkRetriever(provider, store, mode=mode)
+    retriever = _retriever(mode, provider, store)
     synthesizer = ExtractiveAnswerSynthesizer()
     rows = []
     for q in corpus["questions"]:
@@ -136,7 +156,7 @@ def run(backends: list[str], corpus: dict | None = None) -> dict:
         except Exception as exc:  # noqa: BLE001 - an optional backend may be missing
             skipped[backend] = str(exc)
             continue
-        for mode in MODES:
+        for mode in MODES + (LANGCHAIN_MODES if langchain_available() else ()):
             scores, _rows = evaluate(corpus, backend, mode, provider)
             results.append(asdict(scores))
     return {

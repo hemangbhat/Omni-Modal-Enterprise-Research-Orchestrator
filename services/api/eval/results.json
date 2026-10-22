@@ -3,7 +3,7 @@
     "documents": 32,
     "questions": 56
   },
-  "measured_at": "2026-10-18",
+  "measured_at": "2026-10-22",
   "results": [
     {
       "backend": "hashing",
@@ -56,6 +56,56 @@
       }
     },
     {
+      "backend": "hashing",
+      "mode": "langchain-vector",
+      "questions": 56,
+      "recall_at_1": 0.589,
+      "recall_at_5": 0.821,
+      "mrr": 0.684,
+      "supported": 0.607,
+      "by_type": {
+        "keyword": {
+          "questions": 21,
+          "recall_at_1": 0.762,
+          "recall_at_5": 0.857,
+          "mrr": 0.81,
+          "supported": 0.714
+        },
+        "paraphrase": {
+          "questions": 35,
+          "recall_at_1": 0.486,
+          "recall_at_5": 0.8,
+          "mrr": 0.608,
+          "supported": 0.543
+        }
+      }
+    },
+    {
+      "backend": "hashing",
+      "mode": "langchain-hybrid",
+      "questions": 56,
+      "recall_at_1": 0.75,
+      "recall_at_5": 0.929,
+      "mrr": 0.826,
+      "supported": 0.714,
+      "by_type": {
+        "keyword": {
+          "questions": 21,
+          "recall_at_1": 0.905,
+          "recall_at_5": 1.0,
+          "mrr": 0.937,
+          "supported": 0.857
+        },
+        "paraphrase": {
+          "questions": 35,
+          "recall_at_1": 0.657,
+          "recall_at_5": 0.886,
+          "mrr": 0.76,
+          "supported": 0.629
+        }
+      }
+    },
+    {
       "backend": "sentence-transformers",
       "mode": "vector",
       "questions": 56,
@@ -101,6 +151,56 @@
           "recall_at_1": 0.743,
           "recall_at_5": 0.886,
           "mrr": 0.807,
+          "supported": 0.6
+        }
+      }
+    },
+    {
+      "backend": "sentence-transformers",
+      "mode": "langchain-vector",
+      "questions": 56,
+      "recall_at_1": 0.786,
+      "recall_at_5": 0.946,
+      "mrr": 0.853,
+      "supported": 0.679,
+      "by_type": {
+        "keyword": {
+          "questions": 21,
+          "recall_at_1": 0.952,
+          "recall_at_5": 1.0,
+          "mrr": 0.976,
+          "supported": 0.857
+        },
+        "paraphrase": {
+          "questions": 35,
+          "recall_at_1": 0.686,
+          "recall_at_5": 0.914,
+          "mrr": 0.78,
+          "supported": 0.571
+        }
+      }
+    },
+    {
+      "backend": "sentence-transformers",
+      "mode": "langchain-hybrid",
+      "questions": 56,
+      "recall_at_1": 0.804,
+      "recall_at_5": 0.929,
+      "mrr": 0.857,
+      "supported": 0.696,
+      "by_type": {
+        "keyword": {
+          "questions": 21,
+          "recall_at_1": 0.952,
+          "recall_at_5": 1.0,
+          "mrr": 0.976,
+          "supported": 0.857
+        },
+        "paraphrase": {
+          "questions": 35,
+          "recall_at_1": 0.714,
+          "recall_at_5": 0.886,
+          "mrr": 0.786,
           "supported": 0.6
         }
       }

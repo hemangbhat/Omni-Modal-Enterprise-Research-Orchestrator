@@ -46,6 +46,15 @@ api = [
     "python-multipart>=0.0.9",
 ]
 
+# OMERO search as a LangChain retriever/tool, and LangChain hybrid retrieval
+# compared in the evaluation. Not used by the deployed API.
+langchain = [
+    "langchain-core>=1.0",
+    "langchain-community>=0.4",
+    "langchain-classic>=1.0",
+    "rank-bm25>=0.2.2",
+]
+
 test = [
     "hypothesis>=6.0.0",
     "pytest>=8.0.0",

@@ -435,6 +435,28 @@ Measured on 2026-10-18 (`eval/results.json`):
 - This is a small corpus written for this project, not a public benchmark. CI re-runs it with the
   hashing backend and fails if any score drops by more than 0.02 (`--check eval/results.json`).
 
+#### LangChain, compared on the same questions
+
+`services/api/src/omni_modal/integrations/langchain_adapter.py` connects OMERO and LangChain both ways
+(`pip install -e ".[langchain]"`):
+
+- **OMERO in LangChain:** `OmeroRetriever` is a LangChain retriever and `omero_search_tool` an agent tool, fixed to
+  one tenant, user and project, so any LangChain chain or tool-calling agent can search a workspace without being
+  able to widen its scope.
+- **LangChain in OMERO:** `LangChainHybridRetriever` builds the same two strategies from LangChain parts
+  (`InMemoryVectorStore`, `BM25Retriever`, `EnsembleRetriever`). With the extra installed, the evaluation adds them:
+
+| Embeddings | Retrieval | Recall@1 | Recall@5 | MRR |
+|---|---|---|---|---|
+| hashing | OMERO hybrid | **0.768** | 0.929 | **0.839** |
+| hashing | LangChain hybrid | 0.750 | 0.929 | 0.826 |
+| all-MiniLM-L6-v2 | OMERO hybrid | **0.821** | 0.929 | **0.871** |
+| all-MiniLM-L6-v2 | LangChain hybrid | 0.804 | 0.929 | 0.857 |
+
+LangChain's vector-only mode matches OMERO's exactly, which shows the adapter feeds it the same data. Its hybrid
+mode trails by one question out of 56, most likely because its BM25 uses different tuning constants. OMERO's own
+hybrid search stays the default: it scores at least as well and needs no extra dependencies.
+
 The older `python -m omni_modal.benchmark.retrieval_eval` runs a 16-question set through Postgres
 and pgvector; point it only at a disposable database.
 

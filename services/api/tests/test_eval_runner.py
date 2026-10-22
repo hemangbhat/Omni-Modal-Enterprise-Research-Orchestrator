@@ -33,4 +33,4 @@ class EvalRunnerTests(unittest.TestCase):
         better = copy.deepcopy(self.report)
         for r in better["results"]:
             r["mrr"] += 0.1
-        self.assertEqual(len(check(self.report, better, 0.02)), 2)
+        self.assertEqual(len(check(self.report, better, 0.02)), len(self.report["results"]))

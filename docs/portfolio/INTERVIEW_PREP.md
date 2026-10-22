@@ -99,6 +99,14 @@ Use the STAR shape. Each story has files to open if they ask "show me".
 - **Files:** `qa/lexical.py`, `qa/retrieval.py`, `benchmark/eval.py`, `eval/corpus.json`.
 - **Reproduce:** `cd services/api && python -m omni_modal.benchmark.eval --backends hashing,sentence-transformers`
 
+### 6.1b LangChain: measured, not assumed
+- **Question you'll get:** "Why didn't you use LangChain?"
+- **Answer:** I did, as an adapter in both directions, and measured it. OMERO's search works as a LangChain retriever and
+  agent tool, locked to one tenant. LangChain's own hybrid (vector store + BM25 + `EnsembleRetriever`) runs on the same
+  56 questions: its vector mode matches mine exactly (proof the adapter is correct), and its hybrid trails mine by one
+  question. So the core stays framework-free, and LangChain remains available where it adds value, like agents.
+- **Files:** `integrations/langchain_adapter.py`, `tests/test_langchain_adapter.py`.
+
 ### 6.2 Citations you can trust
 - Models cite `[n]`. The server validates every marker against the retrieved set and removes the rest, so a hallucinated `[7]` can't reach the user. Runs like `[1][2]` are read as one group. Each citation carries the sentence that best supports the claim it's attached to.
 - The eval also measures *supported citations* (the quoted snippet contains the fact): 0.71 on the deployed setup. It's lower than recall because without a model the sentence is chosen by word overlap. **Say this before they find it.**

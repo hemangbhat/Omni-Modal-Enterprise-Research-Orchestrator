@@ -62,6 +62,10 @@ def main(argv: list[str] | None = None) -> int:
     if not url:
         print("DATABASE_URL is required.")
         return 2
+    if not url.startswith(("postgres://", "postgresql://")):
+        print("DATABASE_URL must be the database address (it starts with postgresql://), "
+              "not the website or API address. Copy DATABASE_URL from Render's Environment page.")
+        return 2
     from omni_modal.qa.embedding_factory import select_embedding_provider  # noqa: PLC0415
 
     selection = select_embedding_provider()

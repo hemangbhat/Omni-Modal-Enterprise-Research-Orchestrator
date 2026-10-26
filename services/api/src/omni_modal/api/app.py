@@ -603,7 +603,9 @@ def create_app() -> FastAPI:
                 await run_in_threadpool(storage.head, "readiness-probe/does-not-exist")
                 checks["storage"] = f"ok ({storage.backend})"
             except Exception as exc:  # noqa: BLE001
-                checks["storage"] = f"error: {type(exc).__name__}"
+                # S3's error code (e.g. 403 AccessDenied, 301 PermanentRedirect) says what to fix.
+                code = str(((getattr(exc, "response", None) or {}).get("Error") or {}).get("Code", "")).strip()
+                checks["storage"] = f"error: {type(exc).__name__}" + (f" {code}" if code else "")
                 ok = False
 
         # The model provider is optional (answers fall back to extracts without it),
